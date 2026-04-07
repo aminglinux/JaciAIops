@@ -80,13 +80,39 @@ class SkillManager:
                 "阿里云负载均衡", "ecs 端口", "服务能力", "监听配置",
                 "lb-", "实例id", "负载均衡器"
             ]
+        },
+        "deeplog_anomaly_detection_skill": {
+            "path": "monitoring/deeplog_anomaly_detection_skill.md",
+            "category": "monitoring",
+            "description": "DeepLog 日志异常检测",
+            "keywords": [
+                "日志异常检测", "日志异常", "异常日志", "anomaly detection",
+                "deeplog", "lstm", "日志序列", "日志模式",
+                "日志预测", "日志分析", "log analysis",
+                "时间序列", "time series", "日志模板",
+                "drain", "日志解析", "事件模板"
+            ]
+        },
+        "time_series_rca_skill": {
+            "path": "diagnosis/time_series_rca_skill.md",
+            "category": "diagnosis",
+            "description": "时间序列根因分析",
+            "keywords": [
+                "根因分析", "rca", "root cause analysis", "故障定位",
+                "时间序列", "time series", "预测", "prediction",
+                "异常检测", "anomaly detection", "故障预测",
+                "指标分析", "metrics analysis", "性能分析",
+                "趋势分析", "trend analysis", "容量规划",
+                "prophet", "时序预测", "指标预测"
+            ]
         }
     }
     
     CATEGORY_MAP = {
         "diagnosis": "诊断类",
         "connection": "连接类",
-        "network": "网络类"
+        "network": "网络类",
+        "monitoring": "监控类"
     }
     
     def __init__(self, skills_dir: str = None):

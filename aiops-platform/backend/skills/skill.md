@@ -50,6 +50,7 @@
 |-------|---------|-----------|---------|
 | **debug_skill** | `diagnosis/debug_skill.md` | 磁盘, 内存, CPU, 网络, 故障, 排查 | 单机服务器故障排查 |
 | **gnn_rca_skill** | `diagnosis/gnn_rca_skill.md` | 根因分析, RCA, GNN, 微服务, 拓扑 | 微服务根因分析 |
+| **time_series_rca_skill** | `diagnosis/time_series_rca_skill.md` | 时间序列, 预测, 异常检测, 趋势分析 | 时间序列根因分析 |
 | **mysql_deadlock_skill** | `diagnosis/mysql_deadlock_skill.md` | 死锁, deadlock, 锁等待, 事务阻塞 | MySQL 死锁排查与解决 |
 | **mysql_slow_query_skill** | `diagnosis/mysql_slow_query_skill.md` | 慢查询, slow query, SQL优化, 查询慢 | MySQL 慢查询分析 |
 
@@ -63,6 +64,7 @@
 **选择指南**：
 - 单机故障 → `@reference: diagnosis/debug_skill.md`
 - 微服务/多服务故障 → `@reference: diagnosis/gnn_rca_skill.md`
+- 时间序列/指标异常 → `@reference: diagnosis/time_series_rca_skill.md`
 - MySQL 死锁/锁等待 → `@reference: diagnosis/mysql_deadlock_skill.md`
 - MySQL 慢查询 → `@reference: diagnosis/mysql_slow_query_skill.md`
 - Redis 问题 → `@reference: diagnosis/redis_skill.md`
@@ -113,6 +115,12 @@
 
 用于监控系统和日志分析。
 
+#### P0 - 核心监控技能
+
+| Skill | 文件路径 | 触发关键词 | 适用场景 |
+|-------|---------|-----------|---------|
+| **deeplog_anomaly_detection_skill** | `monitoring/deeplog_anomaly_detection_skill.md` | 日志异常检测, DeepLog, LSTM, 日志序列 | DeepLog 日志异常检测 |
+
 #### P1 - 常用监控技能
 
 | Skill | 文件路径 | 触发关键词 | 适用场景 |
@@ -121,6 +129,7 @@
 | **log_analysis_skill** | `monitoring/log_analysis_skill.md` | 日志, log, ELK, Loki, 日志分析 | 日志分析与排查 |
 
 **选择指南**：
+- 日志异常检测 → `@reference: monitoring/deeplog_anomaly_detection_skill.md`
 - Prometheus 问题 → `@reference: monitoring/prometheus_skill.md`
 - 日志分析 → `@reference: monitoring/log_analysis_skill.md`
 
@@ -177,6 +186,14 @@
     │
     ├─ 是否涉及多服务/微服务？
     │   ├─ 是 → gnn_rca_skill (根因分析)
+    │   └─ 否 ↓
+    │
+    ├─ 是否涉及时间序列/指标预测？
+    │   ├─ 是 → time_series_rca_skill (时间序列根因分析)
+    │   └─ 否 ↓
+    │
+    ├─ 是否涉及日志异常检测？
+    │   ├─ 是 → deeplog_anomaly_detection_skill (DeepLog 日志异常检测)
     │   └─ 否 ↓
     │
     ├─ 是否涉及数据库？
@@ -273,12 +290,23 @@
 
 | 关键词 | 推荐 Skill |
 |-------|-----------|
+| 日志异常检测, DeepLog, LSTM | `monitoring/deeplog_anomaly_detection_skill.md` |
+| 日志序列, 日志模式, 日志预测 | `monitoring/deeplog_anomaly_detection_skill.md` |
+| Drain, 日志解析, 事件模板 | `monitoring/deeplog_anomaly_detection_skill.md` |
 | Prometheus, 监控, 指标 | `monitoring/prometheus_skill.md` |
 | PromQL, 告警, alert | `monitoring/prometheus_skill.md` |
 | 日志, log, ELK, Loki | `monitoring/log_analysis_skill.md` |
 | grep, awk, 日志分析 | `monitoring/log_analysis_skill.md` |
 
-### 4.5 备份类关键词
+### 4.5 诊断类关键词（新增）
+
+| 关键词 | 推荐 Skill |
+|-------|-----------|
+| 时间序列, 时序预测, 指标预测 | `diagnosis/time_series_rca_skill.md` |
+| Prophet, 趋势分析, 容量规划 | `diagnosis/time_series_rca_skill.md` |
+| 异常检测, 故障预测, 性能分析 | `diagnosis/time_series_rca_skill.md` |
+
+### 4.6 备份类关键词
 
 | 关键词 | 推荐 Skill |
 |-------|-----------|

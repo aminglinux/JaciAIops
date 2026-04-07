@@ -34,6 +34,9 @@ class IntentParseAgent:
 8. **DATABASE**: 数据库（如 mysql, redis, postgres）
 9. **METRIC**: 指标名称（如 CPU, 内存, 连接池, 延迟）
 10. **ACTION**: 操作动作（如 重启, 扩容, 回滚, 查询）
+11. **LOG_TYPE**: 日志类型（如 应用日志, 系统日志, 错误日志, 访问日志）
+12. **ANALYSIS_TYPE**: 分析类型（如 异常检测, 根因分析, 趋势分析, 预测）
+13. **TIME_SERIES**: 时间序列相关（如 时间序列, 时序数据, 历史数据）
 
 **重要提示**：
 - 阿里云资源 ID 格式识别：
