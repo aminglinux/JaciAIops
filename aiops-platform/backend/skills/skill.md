@@ -48,7 +48,7 @@
 
 | Skill | 文件路径 | 触发关键词 | 适用场景 |
 |-------|---------|-----------|---------|
-| **debug_skill** | `diagnosis/debug_skill.md` | 磁盘, 内存, CPU, 网络, 故障, 排查 | 单机服务器故障排查 |
+| **debug_skill** | `diagnosis/debug_skill.md` | 磁盘, 内存, CPU, 网络, 故障, 排查, OOM, 502, 504, SSH不通, 死锁, CrashLoopBackOff, 防火墙 | 服务器/数据库/中间件/K8S 全栈故障排查 |
 | **gnn_rca_skill** | `diagnosis/gnn_rca_skill.md` | 根因分析, RCA, GNN, 微服务, 拓扑 | 微服务根因分析 |
 | **time_series_rca_skill** | `diagnosis/time_series_rca_skill.md` | 时间序列, 预测, 异常检测, 趋势分析 | 时间序列根因分析 |
 | **mysql_deadlock_skill** | `diagnosis/mysql_deadlock_skill.md` | 死锁, deadlock, 锁等待, 事务阻塞 | MySQL 死锁排查与解决 |
@@ -156,10 +156,10 @@
 
 | Skill | 文件路径 | 触发关键词 | 适用场景 |
 |-------|---------|-----------|---------|
-| **login_skill** | `connection/login_skill.md` | SSH, 连接, 登录, 远程, 凭据 | SSH 连接管理 |
+| **login_skill** | `connection/login_skill.md` | SSH, 连接, 登录, 远程, 凭据, 阿里云, RDS, PolarDB, DMS, 云数据库, 白名单 | 连接管理 (SSH/RDS/PolarDB/DMS/K8S/中间件) |
 
 **选择指南**：
-- 需要连接服务器 → `@reference: connection/login_skill.md`
+- 需要连接服务器或数据库 → `@reference: connection/login_skill.md`
 
 ---
 
@@ -247,7 +247,7 @@
 
 | 关键词 | 推荐 Skill |
 |-------|-----------|
-| 磁盘, 空间, disk, df, du | `diagnosis/debug_skill.md` |
+| 磁盘, 空间, disk, df, du, 内存, memory, free, OOM, CPU, 负载, load, top, 网络, 连接超时, network, 502, 504, 死锁, deadlock, SSH不通, 防火墙, CrashLoopBackOff | `diagnosis/debug_skill.md` |
 | 内存, memory, free, OOM | `diagnosis/debug_skill.md` |
 | CPU, 负载, load, top | `diagnosis/debug_skill.md` |
 | 网络, 连接超时, network | `diagnosis/debug_skill.md` |
@@ -318,7 +318,7 @@
 
 | 关键词 | 推荐 Skill |
 |-------|-----------|
-| SSH, 登录, 远程, 凭据 | `connection/login_skill.md` |
+| SSH, 登录, 远程, 凭据, 阿里云, RDS, PolarDB, DMS, 云数据库, 白名单, 安全组 | `connection/login_skill.md` |
 
 ---
 

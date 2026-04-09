@@ -1,5 +1,6 @@
 import os
 import json
+import shlex
 import subprocess
 import asyncio
 import re
@@ -8,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 
 from ..utils.file_manager import IntermediateFileManager
+from ..utils.logger import get_logger
 from ..core.config import settings
+
+logger = get_logger("tool_registry")
 
 
 class ToolRegistry:
@@ -118,7 +122,12 @@ class ToolRegistry:
         
         try:
             if target_host:
-                ssh_command = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 jaci@{target_host} 'bash -c \"{command}\"'"
+                ssh_user = settings.SSH_USER or "root"
+                ssh_opts = f"-o ConnectTimeout={settings.SSH_CONNECT_TIMEOUT}"
+                if not settings.SSH_STRICT_HOST_KEY_CHECK:
+                    ssh_opts += " -o StrictHostKeyChecking=no"
+                escaped_command = shlex.quote(command)
+                ssh_command = f"ssh {ssh_opts} -i {settings.SSH_KEY_PATH} {ssh_user}@{target_host} {escaped_command}"
                 exec_command = ssh_command
             else:
                 exec_command = command
@@ -158,10 +167,32 @@ class ToolRegistry:
             }
     
     def _check_command_security(self, command: str) -> Dict[str, Any]:
-        """
-        检查命令安全性
-        """
         command_lower = command.lower().strip()
+        
+        if len(command) > 2000:
+            return {
+                "safe": False,
+                "reason": "命令长度超过 2000 字符限制"
+            }
+        
+        injection_patterns = [
+            (r';\s*rm\s', "检测到命令链注入（分号+删除）"),
+            (r'\$\(', "检测到命令替换注入 $(...)"),
+            (r'`[^`]+`', "检测到反引号命令替换"),
+            (r'\|\s*rm\s', "检测到管道注入（管道+删除）"),
+            (r'&&\s*rm\s', "检测到命令链注入（AND+删除）"),
+            (r'\bexport\s+.*=\$\(.*\)', "检测到环境变量注入"),
+            (r'/etc/passwd', "禁止访问 /etc/passwd"),
+            (r'/etc/shadow', "禁止访问 /etc/shadow"),
+            (r'nc\s+-[elp]', "检测到反向 Shell 模式"),
+            (r'/dev/tcp/', "检测到 /dev/tcp 反向 Shell"),
+            (r'bash\s+-i', "检测到交互式 Shell 注入"),
+            (r'python[23]?\s+-c\s+.*import\s+socket', "检测到 Python 反向 Shell"),
+        ]
+        
+        for pattern, reason in injection_patterns:
+            if re.search(pattern, command_lower):
+                return {"safe": False, "reason": reason}
         
         for dangerous_pattern in settings.DANGEROUS_COMMANDS:
             if re.search(dangerous_pattern, command_lower):
@@ -535,7 +566,7 @@ class ToolRegistry:
                         for _, row in df.iterrows():
                             logs.append(row.to_dict())
                     except Exception as e:
-                        print(f"Error loading {parquet_file}: {e}")
+                        logger.error(f"Error loading {parquet_file}: {e}")
             
             error_logs = [l for l in logs if 'error' in str(l).lower() or 'exception' in str(l).lower()]
             

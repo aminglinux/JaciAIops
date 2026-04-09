@@ -3,6 +3,8 @@ import re
 from typing import Optional, List, Dict, Any
 from openai import OpenAI
 from app.core.config import settings
+from .schemas import IntentResult, EntitiesResult, NEREntity
+from ..utils.llm_cache import llm_cache
 
 class IntentParseAgent:
     """
@@ -80,85 +82,91 @@ Output Format (纯 JSON):
     "clarification_needed": false
 }}"""
 
-    async def parse(self, user_input: str) -> dict:
+    async def parse(self, user_input: str) -> IntentResult:
         ner_prompt = self._build_ner_prompt(user_input)
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[{"role": "user", "content": ner_prompt}],
-            temperature=0.1
-        )
-        
-        content = response.choices[0].message.content.strip()
-        content = re.sub(r'^```json\s*', '', content)
-        content = re.sub(r'\s*```$', '', content)
-        
-        try:
-            ner_result = json.loads(content)
-        except json.JSONDecodeError:
-            ner_result = {
-                "entities": [],
-                "keywords": [],
-                "intent": "GENERAL_QA",
-                "confidence": "LOW"
-            }
+        cache_key_messages = json.dumps([{"role": "user", "content": ner_prompt}], ensure_ascii=False)
+        cached = llm_cache.get(settings.OPENAI_MODEL, cache_key_messages, 0.1)
+        if cached is not None:
+            ner_result = cached
+        else:
+            response = self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": ner_prompt}],
+                temperature=0.1
+            )
+            content = response.choices[0].message.content.strip()
+            content = re.sub(r'^```json\s*', '', content)
+            content = re.sub(r'\s*```$', '', content)
+            try:
+                ner_result = json.loads(content)
+            except json.JSONDecodeError:
+                ner_result = {
+                    "entities": [],
+                    "keywords": [],
+                    "intent": "GENERAL_QA",
+                    "confidence": "LOW"
+                }
+            llm_cache.set(settings.OPENAI_MODEL, cache_key_messages, 0.1, ner_result)
         
         entities = ner_result.get("entities", [])
         intent_prompt = self._build_intent_prompt(user_input, entities)
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[{"role": "user", "content": intent_prompt}],
-            temperature=0.1
+        cache_key_messages2 = json.dumps([{"role": "user", "content": intent_prompt}], ensure_ascii=False)
+        cached2 = llm_cache.get(settings.OPENAI_MODEL, cache_key_messages2, 0.1)
+        if cached2 is not None:
+            intent_result = cached2
+        else:
+            response = self.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": intent_prompt}],
+                temperature=0.1
+            )
+            content = response.choices[0].message.content.strip()
+            content = re.sub(r'^```json\s*', '', content)
+            content = re.sub(r'\s*```$', '', content)
+            try:
+                intent_result = json.loads(content)
+            except json.JSONDecodeError:
+                intent_result = {
+                    "intent": "GENERAL_QA",
+                    "entities": {},
+                    "confidence": "LOW",
+                    "normalized_query": user_input,
+                    "clarification_needed": True,
+                    "raw_response": content
+                }
+            llm_cache.set(settings.OPENAI_MODEL, cache_key_messages2, 0.1, intent_result)
+        
+        return IntentResult(
+            intent=intent_result.get("intent", "GENERAL_QA"),
+            confidence=intent_result.get("confidence", "LOW"),
+            entities=intent_result.get("entities", {}),
+            normalized_query=intent_result.get("normalized_query", user_input),
+            ner_entities=[NEREntity(**e) for e in ner_result.get("entities", [])],
+            keywords=ner_result.get("keywords", []),
+            clarification_needed=intent_result.get("clarification_needed", False),
         )
-        
-        content = response.choices[0].message.content.strip()
-        content = re.sub(r'^```json\s*', '', content)
-        content = re.sub(r'\s*```$', '', content)
-        
-        try:
-            intent_result = json.loads(content)
-        except json.JSONDecodeError:
-            intent_result = {
-                "intent": "GENERAL_QA",
-                "entities": {},
-                "confidence": "LOW",
-                "normalized_query": user_input,
-                "clarification_needed": True,
-                "raw_response": content
-            }
-        
-        result = {
-            **intent_result,
-            "ner_entities": entities,
-            "keywords": ner_result.get("keywords", []),
-            "raw_input": user_input
-        }
-        
-        return result
     
-    async def extract_entities(self, user_input: str) -> Dict[str, Any]:
+    async def extract_entities(self, user_input: str) -> EntitiesResult:
         result = await self.parse(user_input)
         
-        entities_by_type = {}
-        for entity in result.get("ner_entities", []):
-            entity_type = entity.get("type")
+        entities_by_type: Dict[str, List[NEREntity]] = {}
+        for entity in result.ner_entities:
+            entity_type = entity.type
             if entity_type not in entities_by_type:
                 entities_by_type[entity_type] = []
-            entities_by_type[entity_type].append({
-                "value": entity.get("value"),
-                "normalized": entity.get("normalized")
-            })
+            entities_by_type[entity_type].append(entity)
         
-        return {
-            "entities_by_type": entities_by_type,
-            "keywords": result.get("keywords", []),
-            "services": entities_by_type.get("SERVICE", []),
-            "servers": entities_by_type.get("SERVER", []) + entities_by_type.get("IP", []),
-            "symptoms": entities_by_type.get("SYMPTOM", []),
-            "databases": entities_by_type.get("DATABASE", []),
-            "metrics": entities_by_type.get("METRIC", []),
-            "actions": entities_by_type.get("ACTION", []),
-            "intent": result.get("intent"),
-            "confidence": result.get("confidence")
-        }
+        return EntitiesResult(
+            entities_by_type=entities_by_type,
+            keywords=result.keywords,
+            services=entities_by_type.get("SERVICE", []),
+            servers=entities_by_type.get("SERVER", []) + entities_by_type.get("IP", []),
+            symptoms=entities_by_type.get("SYMPTOM", []),
+            databases=entities_by_type.get("DATABASE", []),
+            metrics=entities_by_type.get("METRIC", []),
+            actions=entities_by_type.get("ACTION", []),
+            intent=result.intent,
+            confidence=result.confidence,
+        )

@@ -6,6 +6,10 @@ import httpx
 from neo4j import GraphDatabase
 from openai import OpenAI
 from app.core.config import settings
+from .schemas import KnowledgeResult, TopologyInfo
+from ..utils.logger import get_logger
+
+logger = get_logger("knowledge")
 
 class KnowledgeExpertAgent:
     """
@@ -32,7 +36,7 @@ class KnowledgeExpertAgent:
                 with open(debug_skill_path, 'r', encoding='utf-8') as f:
                     return f.read()
         except Exception as e:
-            print(f"Warning: Could not load debug_skill.md: {e}")
+            logger.warning(f"Could not load debug_skill.md: {e}")
         return ""
     
     def _get_neo4j_driver(self):
@@ -42,6 +46,11 @@ class KnowledgeExpertAgent:
                 auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
             )
         return self.neo4j_driver
+    
+    def close(self):
+        if self.neo4j_driver is not None:
+            self.neo4j_driver.close()
+            self.neo4j_driver = None
     
     def _build_prompt(self, service: str, symptom: str, topology_info: Dict, rag_context: str) -> str:
         debug_skill_section = ""
@@ -90,7 +99,7 @@ Output Format
 执行 SOP: [SOP-DB-002] 数据库连接池应急扩容步骤。
 排查建议: [参考 debug_skill.md 中的具体排查步骤]"""
 
-    async def query(self, service: str, symptom: str, topology_info: Dict = None, rag_context: str = None) -> dict:
+    async def query(self, service: str, symptom: str, topology_info: Dict = None, rag_context: str = None) -> KnowledgeResult:
         if topology_info is None:
             topology_info = await self._query_knowledge_graph(service)
         if rag_context is None:
@@ -108,13 +117,13 @@ Output Format
         except Exception as e:
             content = f"知识分析暂时不可用: {str(e)}"
         
-        return {
-            "service": service,
-            "symptom": symptom,
-            "knowledge_report": content,
-            "topology_info": topology_info,
-            "rag_context": rag_context
-        }
+        return KnowledgeResult(
+            service=service,
+            symptom=symptom,
+            knowledge_report=content,
+            topology_info=TopologyInfo(**topology_info) if isinstance(topology_info, dict) else TopologyInfo(),
+            rag_context=rag_context or "",
+        )
     
     async def _query_knowledge_graph(self, service: str) -> Dict:
         try:
@@ -166,6 +175,7 @@ Output Format
                 return self._get_mock_topology(service)
                 
         except Exception as e:
+            logger.error(f"[MOCK DATA] Neo4j 查询失败: {str(e)}，fallback 到模拟数据")
             return {
                 "service": service,
                 "error": str(e),
@@ -184,10 +194,12 @@ Output Format
                     data = response.json()
                     return data.get("answer", "")
         except Exception as e:
-            pass
-        return "RAG 知识库暂时不可用"
+            logger.warning(f"[MOCK DATA] RAG 服务 ({settings.RAG_SERVICE_URL}) 不可用: {str(e)}，将使用空上下文")
+        return ""
     
     def _get_mock_topology(self, service: str) -> Dict:
+        logger.warning(f"[MOCK DATA] Neo4j 不可用或未找到服务 '{service}'，返回模拟拓扑数据。此数据仅供参考，不应用于生产诊断决策。")
+        
         topology_map = {
             "order-service": {
                 "upstream": ["api-gateway", "user-service"],
@@ -222,7 +234,9 @@ Output Format
             "recent_changes": [
                 {"component": "redis-cluster", "change": "主从切换", "time": "5分钟前"}
             ],
-            "source": "mock_data"
+            "_is_mock": True,
+            "source": "mock_data",
+            "disclaimer": "⚠️ 此为模拟数据，Neo4j 知识图谱不可用。请检查 NEO4J_URI/NEO4J_PASSWORD 配置。"
         }
     
     async def get_topology_graph(self, service: str = None, depth: int = 2) -> Dict:

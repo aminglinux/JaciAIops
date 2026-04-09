@@ -5,6 +5,9 @@ import os
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
 from app.core.config import settings
+from ..utils.logger import get_logger
+
+logger = get_logger("observability")
 
 class ObservabilityAnalystAgent:
     """
@@ -120,6 +123,7 @@ class ObservabilityAnalystAgent:
             result = await self._run_ansible_playbook(playbook_content, server_ip)
             return self._parse_metrics_result(result)
         except Exception as e:
+            logger.warning(f"[MOCK DATA] Ansible 收集 {server_ip} 指标失败: {str(e)}，fallback 到模拟数据")
             return {
                 "server": server_ip,
                 "error": str(e),
@@ -158,6 +162,7 @@ class ObservabilityAnalystAgent:
             result = await self._run_ansible_playbook(playbook_content, server_ip)
             return self._parse_logs_result(result)
         except Exception as e:
+            logger.warning(f"[MOCK DATA] Ansible 收集 {server_ip} 日志失败: {str(e)}，fallback 到模拟数据")
             return {
                 "server": server_ip,
                 "error": str(e),
@@ -175,8 +180,8 @@ class ObservabilityAnalystAgent:
             cmd = [
                 "ansible-playbook",
                 "-i", f"{target_host},",
-                "-u", "jaci",
-                "--private-key", os.path.expanduser("~/.ssh/id_rsa"),
+                "-u", settings.SSH_USER or "root",
+                "--private-key", settings.SSH_KEY_PATH,
                 playbook_path
             ]
             
@@ -320,12 +325,19 @@ Output Format
 "【分析结论】order-service 在 10:05 分 P99 延迟从 200ms 飙升至 2s。【异常特征】同时伴随大量 'Connection Timeout' 日志，错误集中在支付接口。【初步定位】下游 payment-service 响应正常，排除下游因素；本地连接池活跃数已满，怀疑是连接池配置不足或慢查询阻塞。" """
 
     async def analyze(self, service: str, metrics_data: Dict = None, logs_data: Dict = None, trace_data: Dict = None) -> dict:
+        used_mock = False
         if metrics_data is None:
             metrics_data = self._generate_mock_metrics(service)
+            used_mock = True
         if logs_data is None:
             logs_data = self._generate_mock_logs(service)
+            used_mock = True
         if trace_data is None:
             trace_data = self._generate_mock_traces(service)
+            used_mock = True
+        
+        if used_mock:
+            logger.warning(f"[MOCK DATA] 服务 '{service}' 的分析使用了模拟数据（metrics/logs/traces），诊断结论可能不准确")
         
         prompt = self._build_prompt(service, metrics_data, logs_data, trace_data)
         
@@ -340,6 +352,16 @@ Output Format
         return {
             "service": service,
             "analysis_report": content,
+            "_data_source": {
+                "metrics": metrics_data.get("source", "unknown"),
+                "logs": logs_data.get("source", "unknown"),
+                "traces": trace_data.get("source", "unknown"),
+                "has_mock_data": any([
+                    metrics_data.get("_is_mock", False),
+                    logs_data.get("_is_mock", False),
+                    trace_data.get("_is_mock", False),
+                ])
+            },
             "metrics_summary": {
                 "latency_p99": metrics_data.get("latency_p99"),
                 "error_rate": metrics_data.get("error_rate"),
@@ -351,6 +373,7 @@ Output Format
         }
     
     def _generate_mock_metrics(self, service: str) -> Dict:
+        logger.warning(f"[MOCK DATA] 监控数据源不可用，为服务 '{service}' 返回模拟指标。此数据仅供参考，不应用于生产诊断决策。")
         return {
             "service": service,
             "latency_p99": "2.5s",
@@ -361,10 +384,14 @@ Output Format
             "traffic": "1200 req/s",
             "active_connections": 450,
             "max_connections": 500,
-            "timestamp": "2026-03-23T10:05:00Z"
+            "timestamp": "2026-03-23T10:05:00Z",
+            "_is_mock": True,
+            "source": "mock_data",
+            "disclaimer": "⚠️ 此为模拟数据，监控数据源（Prometheus/Elasticsearch）不可用。"
         }
     
     def _generate_mock_logs(self, service: str) -> Dict:
+        logger.warning(f"[MOCK DATA] 日志数据源不可用，为服务 '{service}' 返回模拟日志。此数据仅供参考，不应用于生产诊断决策。")
         return {
             "service": service,
             "total_errors": 156,
@@ -376,10 +403,14 @@ Output Format
             "samples": [
                 {"timestamp": "2026-03-23T10:05:12Z", "level": "ERROR", "message": "Connection timeout after 30000ms"},
                 {"timestamp": "2026-03-23T10:05:15Z", "level": "ERROR", "message": "HikariPool-1 - Connection is not available"}
-            ]
+            ],
+            "_is_mock": True,
+            "source": "mock_data",
+            "disclaimer": "⚠️ 此为模拟数据，日志数据源（Elasticsearch/Loki）不可用。"
         }
     
     def _generate_mock_traces(self, service: str) -> Dict:
+        logger.warning(f"[MOCK DATA] 链路追踪数据源不可用，为服务 '{service}' 返回模拟链路数据。此数据仅供参考，不应用于生产诊断决策。")
         return {
             "service": service,
             "total_spans": 5000,
@@ -387,5 +418,8 @@ Output Format
             "anomalies": [
                 {"span": "db.query", "duration": "5.2s", "anomaly": "slow_query"},
                 {"span": "http.call", "duration": "3.1s", "anomaly": "timeout"}
-            ]
+            ],
+            "_is_mock": True,
+            "source": "mock_data",
+            "disclaimer": "⚠️ 此为模拟数据，链路追踪数据源（Jaeger）不可用。"
         }

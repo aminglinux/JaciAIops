@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
@@ -6,13 +7,13 @@ class Settings(BaseSettings):
     APP_NAME: str = "AIOps Platform"
     DEBUG: bool = True
     
-    SECRET_KEY: str = "aiops-secret-key-change-in-production-please"
+    SECRET_KEY: str = ""
     
     DATABASE_URL: str = "sqlite:///./data/aiops.db"
     
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
+    NEO4J_PASSWORD: str = ""
     
     RAG_SERVICE_URL: str = "http://localhost:8001"
     
@@ -20,9 +21,27 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     OPENAI_MODEL: str = "qwen-plus"
     
+    SSH_USER: str = ""
+    SSH_KEY_PATH: str = os.path.expanduser("~/.ssh/id_rsa")
+    SSH_STRICT_HOST_KEY_CHECK: bool = False
+    SSH_CONNECT_TIMEOUT: int = 10
+    
     ALIYUN_ACCESS_KEY_ID: str = ""
     ALIYUN_ACCESS_KEY_SECRET: str = ""
     ALIYUN_REGION_ID: str = "cn-hangzhou"
+
+    RDS_HOST: str = ""
+    RDS_PORT: int = 3306
+    RDS_USER: str = ""
+    RDS_PASSWORD: str = ""
+    RDS_DB_NAME: str = "aiops_platform"
+    RDS_SSL_MODE: str = "REQUIRED"
+    RDS_CONNECTION_TIMEOUT: int = 10
+    RDS_MAX_CONNECTIONS: int = 20
+    RDS_POOL_RECYCLE: int = 3600
+
+    POLARDB_CLUSTER_ID: str = ""
+    POLARDB_ENDPOINT_TYPE: str = "cluster"
     
     SMTP_HOST: str = "smtp.163.com"
     SMTP_PORT: int = 465
@@ -121,3 +140,17 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 settings = Settings()
+
+def validate_security_settings():
+    warnings_list = []
+    if not settings.SECRET_KEY:
+        warnings_list.append("SECRET_KEY 未设置，请在 .env 中配置")
+    if not settings.NEO4J_PASSWORD:
+        warnings_list.append("NEO4J_PASSWORD 未设置，请在 .env 中配置")
+    if not settings.SSH_USER:
+        warnings_list.append("SSH_USER 未设置，远程命令执行将不可用，请在 .env 中配置")
+    if not settings.SSH_STRICT_HOST_KEY_CHECK:
+        warnings_list.append("SSH_STRICT_HOST_KEY_CHECK=False，生产环境建议启用主机密钥验证")
+    for w in warnings_list:
+        warnings.warn(w, UserWarning, stacklevel=2)
+    return warnings_list

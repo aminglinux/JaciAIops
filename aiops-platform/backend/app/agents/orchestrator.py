@@ -1,4 +1,5 @@
 import asyncio
+import shlex
 import traceback
 import os
 import subprocess
@@ -13,6 +14,10 @@ from .action_execute import ActionExecuteAgent
 from .skill_manager import SkillManager
 from .tool_registry import ToolRegistry
 from ..utils.file_manager import IntermediateFileManager
+from ..utils.logger import get_logger
+from ..core.config import settings
+
+logger = get_logger("orchestrator")
 
 
 class MultiAgentOrchestrator:
@@ -65,11 +70,7 @@ class MultiAgentOrchestrator:
             matched_skills = self.skill_manager.search_relevant_skills(user_query, intent_data)
             skills_content = self.skill_manager.get_relevant_skills_content(matched_skills)
             
-            print(f"\n{'='*60}")
-            print(f"[Skill 匹配结果]")
-            print(f"匹配到的 Skills: {matched_skills}")
-            print(f"Skills 内容长度: {len(skills_content)} 字符")
-            print(f"{'='*60}\n")
+            logger.info(f"Skill matching result: {matched_skills}, content_length={len(skills_content)}")
             
             result["stages"]["skill_matching"] = {
                 "matched_skills": matched_skills,
@@ -110,7 +111,7 @@ class MultiAgentOrchestrator:
             
         except Exception as e:
             error_trace = traceback.format_exc()
-            print(f"Error in process_query: {error_trace}")
+            logger.error(f"Error in process_query: {error_trace}")
             result["error"] = str(e)
             result["error_trace"] = error_trace
             result["final_decision"] = {
@@ -281,7 +282,12 @@ class MultiAgentOrchestrator:
         try:
             all_outputs = []
             for i, cmd in enumerate(commands):
-                full_command = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 jaci@{target_host} 'bash -c \"{cmd}\"'"
+                ssh_user = settings.SSH_USER or "root"
+                ssh_opts = f"-o ConnectTimeout={settings.SSH_CONNECT_TIMEOUT}"
+                if not settings.SSH_STRICT_HOST_KEY_CHECK:
+                    ssh_opts += " -o StrictHostKeyChecking=no"
+                escaped_cmd = shlex.quote(cmd)
+                full_command = f"ssh {ssh_opts} -i {settings.SSH_KEY_PATH} {ssh_user}@{target_host} {escaped_cmd}"
                 
                 try:
                     result = subprocess.run(

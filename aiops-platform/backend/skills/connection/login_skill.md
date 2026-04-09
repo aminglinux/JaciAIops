@@ -1,159 +1,371 @@
-说明：
+# 连接管理 Skill
 
-本文档定义了各类节点的连接方式、协议及凭据引用路径。
-Agent 在生成执行脚本时，需根据此文档动态组装连接参数。
-安全原则：所有 password 或 token 字段均指向本地环境变量或 Vault 路径，不存储明文。
+## 职责边界
+本 Skill 只定义 **"怎么连"**：连接模板、协议、端口、凭据引用。
+连接成功后的故障诊断 → `@reference: diagnosis/debug_skill.md`
 
-1. 操作系统与虚拟机 (Linux/VM/Host)
-1.1 标准主机连接
-节点类型: linux_host
-协议: SSH
-默认端口: 22
-连接模板:
-{  "ansible_connection": "ssh",  "ansible_user": "{{ lookup('env', 'SSH_USER') }}",  "ansible_ssh_private_key_file": "/keys/id_rsa",  "ansible_ssh_common_args": "-o StrictHostKeyChecking=no"}
-Bash 登录指令生成:
-ssh -i /keys/id_rsa -p 22 <USER>@<HOST_IP>
-1.2 网络设备
-节点类型: network_switch
-协议: SSH (需特定 Ansible 模块)
-连接模板:
-{  "ansible_connection": "network_cli",  "ansible_network_os": "cisco.ios.ios",  "ansible_user": "{{ vault_network_user }}",  "ansible_password": "{{ vault_network_pass }}"}
+安全原则：所有 password / token 字段均指向环境变量或 Vault，禁止硬编码明文。
 
-2. 数据库
-2.1 MySQL/MariaDB
-节点类型: mysql_db
-协议: TCP (MySQL Protocol)
-默认端口: 3306
-客户端工具: mysql (CLI)
-连接指令生成:
-mysql -h <HOST_IP> -P 3306 -u <USER> -p'<PASSWORD>' -e "SHOW PROCESSLIST;"
-Ansible 模块配置:
-community.mysql.mysql_query:  login_host: "<HOST_IP>"  login_user: "{{ db_user }}"  login_password: "{{ db_pass }}"  query: "SELECT 1"
-2.2 Redis
-节点类型: redis_cache
-协议: TCP
-默认端口: 6379
-连接指令生成:
-redis-cli -h <HOST_IP> -p 6379 -a '<PASSWORD>' INFO
+---
 
-3. 中间件
-3.1 RabbitMQ
-节点类型: rabbitmq_node
-协议: HTTP API / CLI
-默认端口: 15672 (API), 5672 (AMQP)
-连接指令生成:
-# 本地 CLI 方式 (通过 SSH 后执行)rabbitmqctl status# 远程 API 方式curl -u <USER>:<PASSWORD> http://<HOST_IP>:15672/api/overview
-3.2 Nginx/Tomcat (应用层)
-节点类型: web_server
-访问方式: 通常通过 SSH 进入宿主机操作，或通过 HTTP 接口探测。
-特定命令: 无需独立登录指令，依赖主机 SSH 权限执行 nginx -t 或查看日志。
+## 1. 操作系统与虚拟机 (Linux/VM/Host)
 
-4. Kubernetes (K8S) 集群
-4.1 标准 K8S 集群
-节点类型: k8s_cluster
-协议: HTTPS (Kube-apiserver)
-默认端口: 6443
-认证方式: kubeconfig 文件 或 ServiceAccount Token
-连接指令生成:
-# 使用 Kubeconfigexport KUBECONFIG=/etc/rancher/k3s/k3s.yamlkubectl get pods -n <NAMESPACE># 使用 Token (远程调用)kubectl --server=https://<K8S_API_IP>:6443 --token=<TOKEN> --insecure-skip-tls-verify get nodes
-Ansible 模块配置:
-kubernetes.core.k8s_info:  kubeconfig: "/path/to/kubeconfig"  api_key: "{{ k8s_token }}"  host: "https://<K8S_API_IP>:6443"  validate_certs: false  kind: Pod
+### 1.1 标准主机 SSH 连接
+- **节点类型**: `linux_host`
+- **协议**: SSH
+- **默认端口**: 22
+- **凭据来源**: `SSH_USER` (env), `SSH_KEY_PATH` (env)
 
-5. 云平台/管理节点
-5.1 vCenter/ESXi
-节点类型: vmware_host
-协议: HTTPS (SOAP/REST)
-连接方式: 通过 Ansible vmware_guest 模块
-连接参数:
-hostname: "<VCENTER_IP>"username: "{{ vcenter_user }}"password: "{{ vcenter_pass }}"validate_certs: no
+Ansible 连接模板:
+```json
+{
+  "ansible_connection": "ssh",
+  "ansible_user": "{{ lookup('env', 'SSH_USER') }}",
+  "ansible_ssh_private_key_file": "{{ lookup('env', 'SSH_KEY_PATH') }}",
+  "ansible_ssh_common_args": "-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+}
+```
 
-6. SSH 连接故障排查流程
-当 SSH 连接失败时，按以下步骤进行排查和恢复：
+Bash 登录指令:
+```bash
+ssh -i {{ ssh_key_path }} -p 22 -o StrictHostKeyChecking=no -o ConnectTimeout=10 {{ ssh_user }}@<HOST_IP>
+```
 
-6.1 检查网络连通性
-步骤 1: 测试基础网络连通性
-  命令: ping -c 4 <HOST_IP>
-  预期结果: 收到 ICMP 回复，丢包率 < 50%
-  判断:
-    - 成功 → 网络层正常，进入步骤 6.2
-    - 失败 → 网络故障，检查防火墙/安全组/路由
+### 1.2 网络设备
+- **节点类型**: `network_switch`
+- **协议**: SSH (network_cli)
+- **凭据来源**: Vault
 
-步骤 2: 测试端口可达性
-  命令: nc -zv <HOST_IP> 22 或 telnet <HOST_IP> 22
-  预期结果: Connected to <HOST_IP> 22
-  判断:
-    - 成功 → 端口开放，可能是认证问题
-    - 失败 → 端口不可达，进入步骤 6.3（使用替代连接方式）
+```json
+{
+  "ansible_connection": "network_cli",
+  "ansible_network_os": "cisco.ios.ios",
+  "ansible_user": "{{ vault_network_user }}",
+  "ansible_password": "{{ vault_network_pass }}"
+}
+```
 
-6.2 检查 SSH 认证问题
-步骤 3: 验证密钥权限
-  命令: ls -la <SSH_KEY_PATH>
-  预期结果: 权限应为 600 (-rw-------)
-  修复: chmod 600 <SSH_KEY_PATH>
+---
 
-步骤 4: 尝试使用密码登录（如有）
-  命令: ssh -o PreferredAuthentications=password <USER>@<HOST_IP>
+## 2. 数据库连接
 
-6.3 使用替代连接方式（当网络/SSH 服务异常时）
-当 ping 和端口测试均失败时，使用以下备用连接方式：
+### 2.1 本地/自建 MySQL/MariaDB
+- **节点类型**: `mysql_db`
+- **协议**: TCP (MySQL Protocol)
+- **默认端口**: 3306
 
-方式 A: 云厂商 Workbench/控制台
-适用场景: 云服务器（阿里云、腾讯云、AWS、Azure 等）
-操作步骤:
-  1. 登录云厂商控制台
-  2. 找到目标实例 <HOST_IP>
-  3. 使用"远程连接"/"Workbench"/"VNC"功能
-  4. 使用控制台提供的凭据登录（通常是 root 密码或临时密钥）
-  5. 登录后执行诊断命令检查 SSH 服务状态
+Bash 连接指令:
+```bash
+mysql -h <HOST_IP> -P 3306 -u {{ db_user }} -p'{{ db_pass }}' -e "<SQL>"
+```
 
-方式 B: VNC/远程桌面（物理机/虚拟机）
-适用场景: 自有数据中心、VMware vSphere、Proxmox
-操作步骤:
-  1. 通过 vCenter/Proxmox 管理界面找到虚拟机
-  2. 打开控制台/VNC 会话
-  3. 使用本地账户登录系统
-  4. 进入系统后检查 SSH 服务
+Ansible 模块:
+```yaml
+community.mysql.mysql_query:
+  login_host: "<HOST_IP>"
+  login_port: 3306
+  login_user: "{{ db_user }}"
+  login_password: "{{ db_pass }}"
+  query: "SELECT 1"
+```
 
-6.4 登录后检查 SSH 服务状态
-步骤 5: 检查 SSHD 服务状态
-  命令: systemctl status sshd 或 service sshd status
-  判断:
-    - active (running) → 服务正常，检查防火墙
-    - inactive/dead → 服务未启动，执行启动命令
+### 2.2 Redis
+- **节点类型**: `redis_cache`
+- **协议**: TCP
+- **默认端口**: 6379
 
-步骤 6: 启动/重启 SSHD 服务
-  命令: systemctl start sshd && systemctl enable sshd
-  验证: systemctl status sshd 确认状态为 active
+Bash 连接指令:
+```bash
+redis-cli -h <HOST_IP> -p 6379 -a '{{ redis_pass }}' INFO
+```
 
-步骤 7: 检查防火墙规则
-  命令: iptables -L -n | grep 22 或 firewall-cmd --list-ports
-  判断:
-    - 端口 22 未开放 → 添加规则:
-      - iptables: iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-      - firewalld: firewall-cmd --add-port=22/tcp --permanent && firewall-cmd --reload
-    - 端口 22 已开放 → 检查 SELinux/AppArmor
+---
 
-步骤 8: 检查 SSH 配置文件
-  文件: /etc/ssh/sshd_config
-  关键配置项:
-    - Port 22 （确认监听端口）
-    - ListenAddress 0.0.0.0 （确认监听地址）
-    - PasswordAuthentication yes/no （根据安全策略）
-    - PermitRootLogin yes/no （根据安全策略）
-  修改后重载: systemctl reload sshd
+## 3. 阿里云数据库连接 (RDS / PolarDB / DMS)
 
-6.5 验证恢复
-步骤 9: 从运维机重新尝试 SSH 连接
-  命令: ssh -i <SSH_KEY_PATH> -p 22 <USER>@<HOST_IP> "echo 'SSH OK'"
-  预期结果: 输出 "SSH OK"
-  判断:
-    - 成功 → 故障恢复完成
-    - 失败 → 记录错误日志，升级至 L2 支持
+### 3.1 连接方式总览
 
-7. 凭据映射表
-此部分供 Orchestrator 解析变量使用
+| 方式 | 适用场景 | 特点 |
+|------|---------|------|
+| DMS 控制台 | 日常运维、图形化操作 | Web 界面，无需客户端 |
+| CLI 命令行 | 脚本自动化 | mysql/pg CLI + SSL |
+| Python SQLAlchemy | 应用程序代码 | 推荐用于 AIOps 平台 |
+| 内网 VPC 地址 | 生产环境 | 低延迟，高安全性 |
+| 公网地址 | 开发测试 | 需配置白名单 |
 
-变量名	类型	说明	示例来源
-{{ ssh_key_path }}	SSH Key	运维机上的私钥路径	/home/aiops/.ssh/id_rsa
-{{ vault_db_root_pass }}	Password	数据库 Root 密码	Vault: secret/data/mysql
-{{ k8s_token }}	Token	K8S 集群访问令牌	Env: K8S_API_TOKEN
+### 3.2 必需环境变量
+
+| 变量名 | 类型 | 说明 |
+|--------|------|------|
+| `RDS_HOST` | string | RDS/PolarDB 连接地址 (如 `rm-bp1xxxx.mysql.rds.aliyuncs.com`) |
+| `RDS_PORT` | int | 端口 (MySQL=3306, PG=5432) |
+| `RDS_USER` | string | 数据库用户名 |
+| `RDS_PASSWORD` | string | 数据库密码 (通过 .env 注入) |
+| `RDS_DB_NAME` | string | 默认数据库名 |
+| `ALIYUN_ACCESS_KEY_ID` | string | 阿里云 AK (用于 API 操作) |
+| `ALIYUN_ACCESS_KEY_SECRET` | string | 阿里云 SK |
+| `ALIYUN_REGION_ID` | string | 地域 (如 `cn-hangzhou`) |
+
+可选变量:
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `RDS_SSL_MODE` | `REQUIRED` | SSL 模式: DISABLED, REQUIRED, VERIFY_CA, VERIFY_IDENTITY |
+| `RDS_CONNECTION_TIMEOUT` | `10` | 连接超时(秒) |
+| `RDS_MAX_CONNECTIONS` | `20` | 连接池最大连接数 |
+| `RDS_POOL_RECYCLE` | `3600` | 连接回收时间(秒) |
+| `POLARDB_ENDPOINT_TYPE` | `cluster` | PolarDB 端点类型: cluster(主节点) / reader(只读) |
+
+### 3.3 MySQL CLI 连接模板
+
+```bash
+mysql -h {{ rds_host }} -P {{ rds_port }} \
+      -u {{ rds_user }} -p'{{ rds_pass }}' \
+      --ssl-mode={{ rds_ssl_mode | default('REQUIRED') }} \
+      --connect-timeout={{ rds_connection_timeout | default(10) }} \
+      {{ rds_db_name }}
+```
+
+### 3.4 PostgreSQL CLI 连接模板
+
+```bash
+PGPASSWORD='{{ rds_pass }}' psql \
+    "host={{ rds_host }} port={{ rds_port }} \
+     dbname={{ rds_db_name }} user={{ rds_user }} \
+     sslmode=require connect_timeout={{ rds_connection_timeout | default(10) }}"
+```
+
+### 3.5 Python SQLAlchemy 连接 (推荐用于应用层)
+
+#### MySQL:
+```python
+from sqlalchemy import create_engine, text
+import os
+
+engine = create_engine(
+    f"mysql+pymysql://{os.getenv('RDS_USER')}:{os.getenv('RDS_PASSWORD')}"
+    f"@{os.getenv('RDS_HOST')}:{os.getenv('RDS_PORT')}/{os.getenv('RDS_DB_NAME')}"
+    f"?charset=utf8mb4&ssl_mode={os.getenv('RDS_SSL_MODE', 'REQUIRED')}",
+    pool_size=int(os.getenv('RDS_MAX_CONNECTIONS', '10')),
+    pool_recycle=int(os.getenv('RDS_POOL_RECYCLE', '3600')),
+    pool_pre_ping=True,
+)
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT VERSION()"))
+    print(result.scalar())
+```
+
+#### PostgreSQL:
+```python
+engine = create_engine(
+    f"postgresql+psycopg2://{os.getenv('RDS_USER')}:{os.getenv('RDS_PASSWORD')}"
+    f"@{os.getenv('RDS_HOST')}:{os.getenv('RDS_PORT')}/{os.getenv('RDS_DB_NAME')}"
+    f"?sslmode={os.getenv('RDS_SSL_MODE', 'require')}",
+)
+```
+
+### 3.6 PolarDB 多节点连接
+
+```python
+# 写操作 → 主节点 (Cluster Endpoint)
+WRITE_ENGINE = create_engine(
+    f"mysql+pymysql://{user}:{passw}@{cluster_endpoint}:3306/{db}?ssl_mode=REQUIRED",
+    pool_size=5,
+)
+
+# 读操作 → 只读节点 (Reader Endpoint, 格式: <集群ID>.ro.mysql.polardb.rds.aliyuncs.com)
+READ_ENGINE = create_engine(
+    f"mysql+pymysql://{user}:{passw}@{reader_endpoint}:3306/{db}?ssl_mode=REQUIRED",
+    pool_size=10,
+)
+```
+
+### 3.7 Ansible 执行 MySQL 查询
+
+```yaml
+- name: 检查 RDS 连接状态
+  community.mysql.mysql_query:
+    login_host: "{{ rds_host }}"
+    login_port: "{{ rds_port }}"
+    login_user: "{{ rds_user }}"
+    login_password: "{{ rds_pass }}"
+    login_db: "{{ rds_db_name }}"
+    login_ssl_mode: REQUIRED
+    query:
+      - SELECT @@version
+      - SHOW STATUS LIKE 'Threads_connected'
+  register: rds_status
+  ignore_errors: true
+```
+
+### 3.8 DMS (数据管理服务) 连接
+
+Web 控制台方式:
+1. 登录 [DMS 控制台](https://dms.console.aliyun.com/)
+2. 选择目标实例 → 点击「登录」
+3. 使用已授权账号登录 → SQL Console 执行查询
+
+API 自动化方式:
+```python
+import requests, os
+from datetime import datetime, timezone
+
+def dms_execute_sql(instance_id: str, sql: str, db_name: str):
+    endpoint = f"dms-vpc.{os.getenv('ALIYUN_REGION_ID')}.aliyuncs.com"
+    headers = {
+        "Content-Type": "application/json",
+        "x-acs-action": "ExecuteDataCorrect",
+        "x-acs-version": "2022-01-06",
+        "x-acs-accesskey-id": os.getenv("ALIYUN_ACCESS_KEY_ID"),
+        "x-acs-signature-method": "HMAC-SHA256",
+        "x-acs-timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    body = {"InstanceId": instance_id, "DbId": db_name, "Sql": sql, "OrderType": "COMMON"}
+    return requests.post(f"https://{endpoint}/", headers=headers, json=body).json()
+```
+
+### 3.9 连通性快速验证 (仅验证能否连上)
+
+```bash
+# Step 1: TCP 端口可达性
+nc -zv -w 5 {{ rds_host }} {{ rds_port }}
+# 或: telnet {{ rds_host }} {{ rds_port }}
+
+# Step 2: DNS 解析
+nslookup {{ rds_host }}
+
+# Step 3: 凭据验证 (MySQL)
+mysqladmin -h {{ rds_host }} -P {{ rds_port }} -u {{ rds_user }} -p'{{ rds_pass }}' ping
+
+# Step 3: 凭据验证 (PostgreSQL)
+PGPASSWORD='{{ rds_pass }}' psql "host={{ rds_host }} port={{ rds_port }} dbname={{ rds_db_name }} user={{ rds_user }} sslmode=require" -c "SELECT 1;"
+```
+
+判断标准:
+| 结果 | 含义 | 下一步 |
+|------|------|--------|
+| Connected / Succeeded | 端口可达 + 认证通过 | ✅ 连接正常 |
+| Access denied | 用户名/密码错误 | 检查 `.env` 中 `RDS_USER` / `RDS_PASSWORD` |
+| Connection timed out | 网络不通 | 检查白名单/安全组 (见 debug_skill) |
+| SSL connection error | TLS 配置不匹配 | 调整 `--ssl-mode` 参数 |
+
+---
+
+## 4. 中间件连接
+
+### 4.1 RabbitMQ
+- **节点类型**: `rabbitmq_node`
+- **协议**: HTTP API (15672) / AMQP (5672)
+
+本地 CLI (通过 SSH 后执行):
+```bash
+rabbitmqctl status
+```
+
+远程 API:
+```bash
+curl -u <USER>:<PASS> http://<HOST_IP>:15672/api/overview
+```
+
+### 4.2 Nginx/Tomcat
+- **节点类型**: `web_server`
+- **访问方式**: 通过 SSH 进入宿主机操作，或 HTTP 接口探测
+
+---
+
+## 5. Kubernetes (K8S) 集群
+
+- **节点类型**: `k8s_cluster`
+- **协议**: HTTPS (Kube-apiserver)
+- **默认端口**: 6443
+- **认证**: kubeconfig 文件 或 ServiceAccount Token
+
+Kubeconfig 方式:
+```bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl get pods -n <NAMESPACE>
+```
+
+Token 远程调用:
+```bash
+kubectl --server=https::<K8S_API_IP>:6443 --token=<TOKEN> --insecure-skip-tls-verify get nodes
+```
+
+Ansible 模块:
+```yaml
+kubernetes.core.k8s_info:
+  kubeconfig: "/path/to/kubeconfig"
+  api_key: "{{ k8s_token }}"
+  host: "https://<K8S_API_IP>:6443"
+  validate_certs: false
+  kind: Pod
+```
+
+---
+
+## 6. 云平台/管理节点
+
+### 6.1 vCenter/ESXi
+- **节点类型**: `vmware_host`
+- **协议**: HTTPS (SOAP/REST)
+
+```yaml
+hostname: "<VCENTER_IP>"
+username: "{{ vcenter_user }}"
+password: "{{ vcenter_pass }}"
+validate_certs: no
+```
+
+### 6.2 备用连接方式 (当 SSH/RDP 不可用时)
+
+当常规网络连接失败时使用：
+
+**方式 A — 云厂商控制台 (Workbench/VNC)**:
+适用: 阿里云 ECS、腾讯云 CVM、AWS EC2、Azure VM
+步骤: 控制台 → 实例详情 → 远程连接/VNC → 使用控制台凭据登录
+
+**方式 B — 虚拟化平台 VNC**:
+适用: VMware vSphere、Proxmox、OpenStack
+步骤: 管理界面 → 虚拟机 → 打开控制台会话
+
+---
+
+## 7. SSH 连通性快速验证 (仅 2 步)
+
+> ⚠️ 深度故障恢复（服务重启、防火墙修复等）→ `@reference: diagnosis/debug_skill.md` 第 7 节
+
+### Step 1: 网络层验证
+```bash
+ping -c 4 <HOST_IP>
+```
+- 成功 (丢包率 < 50%) → 进入 Step 2
+- 失败 (100% loss) → 网络故障，检查路由/防火墙/安全组
+
+### Step 2: 端口层验证
+```bash
+nc -zv -w 5 <HOST_IP> 22
+```
+- Connected → 端口开放，检查认证凭据
+- Connection refused → 服务未启动或防火墙拦截
+- timeout → 端口不可达，进入备用连接方式 (第 6.2 节)
+
+---
+
+## 8. 凭据映射表
+
+供 Orchestrator 和 Agent 动态解析变量使用。
+
+| 变量名 | 类型 | 说明 | 来源 |
+|--------|------|------|------|
+| `{{ ssh_key_path }}` | SSH Key | 运维机私钥路径 | Env: `SSH_KEY_PATH` (默认 `~/.ssh/id_rsa`) |
+| `{{ ssh_user }}` | User | SSH 登录用户名 | Env: `SSH_USER` |
+| `{{ rds_host }}` | Host | 阿里云 RDS/PolarDB 地址 | Env: `RDS_HOST` |
+| `{{ rds_port }}` | Port | 数据库端口 | Env: `RDS_PORT` (默认 3306) |
+| `{{ rds_user }}` | User | 数据库用户名 | Env: `RDS_USER` |
+| `{{ rds_pass }}` | Password | 数据库密码 | Env: `RDS_PASSWORD` |
+| `{{ rds_db_name }}` | Database | 数据库名 | Env: `RDS_DB_NAME` |
+| `{{ aliyun_ak_id }}` | Key | 阿里云 AccessKey ID | Env: `ALIYUN_ACCESS_KEY_ID` |
+| `{{ aliyun_ak_secret }}` | Secret | 阿里云 AccessKey Secret | Env: `ALIYUN_ACCESS_KEY_SECRET` |
+| `{{ aliyun_region }}` | Region | 阿里云地域 | Env: `ALIYUN_REGION_ID` |
+| `{{ vault_db_root_pass }}` | Password | 数据库 Root 密码 | Vault: `secret/data/mysql` |
+| `{{ k8s_token }}` | Token | K8S 集群访问令牌 | Env: `K8S_API_TOKEN` |

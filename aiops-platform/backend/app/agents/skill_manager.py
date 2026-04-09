@@ -29,12 +29,14 @@ class SkillManager:
         "debug_skill": {
             "path": "diagnosis/debug_skill.md",
             "category": "diagnosis",
-            "description": "服务器故障排查",
+            "description": "故障排查 (网络/存储/CPU/内存/数据库/中间件/K8S/SSH恢复)",
             "keywords": [
                 "磁盘", "disk", "空间", "space", "内存", "memory", "cpu", "负载", "load",
                 "网络", "network", "连接", "connection", "超时", "timeout", "数据库", "database",
                 "mysql", "redis", "nginx", "k8s", "kubernetes", "pod", "服务", "service",
-                "异常", "error", "故障", "failure", "排查", "diagnose", "慢", "slow"
+                "异常", "error", "故障", "failure", "排查", "diagnose", "慢", "slow",
+                "ssh不通", "端口不通", "防火墙", "白名单", "sshd", "selinux",
+                "oom", "死锁", "deadlock", "锁等待", "502", "504", "crashloop"
             ]
         },
         "gnn_rca_skill": {
@@ -64,10 +66,13 @@ class SkillManager:
         "login_skill": {
             "path": "connection/login_skill.md",
             "category": "connection",
-            "description": "SSH 连接管理",
+            "description": "连接管理 (SSH/RDS/PolarDB/DMS/K8S/中间件)",
             "keywords": [
                 "连接", "connect", "登录", "login", "ssh", "远程", "remote",
-                "主机", "host", "服务器", "server", "凭据", "credential"
+                "主机", "host", "服务器", "server", "凭据", "credential",
+                "阿里云", "aliyun", "rds", "polardb", "dms", "云数据库",
+                "白名单", "安全组", "mysql", "postgresql", "redis", "rabbitmq",
+                "k8s", "kubernetes", "vcenter", "vnc", "workbench"
             ]
         },
         "lb_port_connectivity_skill": {
