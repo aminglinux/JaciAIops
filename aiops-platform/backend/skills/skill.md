@@ -320,6 +320,23 @@
 
 ---
 
+### 2.14 系统服务类 (Systemd)
+
+用于 Systemd 服务自启动与配置管理。
+
+#### P0 - 核心系统服务技能
+
+| Skill | 文件路径 | 触发关键词 | 适用场景 |
+|-------|---------|-----------|---------|
+| **systemd_autostart_skill** | `systemd/systemd_autostart_skill.md` | systemd, systemctl, 服务自启动, 开机启动, 服务不启动, enable, disabled, 服务恢复 | Systemd 服务自启动故障排查 |
+
+**选择指南**：
+- 服务重启后不自动启动 → `@reference: systemd/systemd_autostart_skill.md`
+- systemctl enable/disable 问题 → `@reference: systemd/systemd_autostart_skill.md`
+- 服务配置文件问题 → `@reference: systemd/systemd_autostart_skill.md`
+
+---
+
 ## 3. 快速决策树
 
 ```
@@ -417,6 +434,10 @@
     │
     ├─ 是否涉及配置漂移/配置中心？
     │   ├─ 是 → config_drift_skill (配置漂移检测)
+    │   └─ 否 ↓
+    │
+    ├─ 是否涉及 systemd 服务自启动？
+    │   ├─ 是 → systemd_autostart_skill (服务自启动排查)
     │   └─ 否 ↓
     │
     ├─ 是否涉及 AD/域控？
@@ -582,7 +603,16 @@
 | 部署失败, CI/CD, Jenkins, K8s部署 | `devops/deployment_skill.md` |
 | 配置漂移, 配置不一致, Apollo, Nacos, ConfigMap | `devops/config_drift_skill.md` |
 
-### 4.14 连接类关键词
+### 4.14 系统服务类关键词
+
+| 关键词 | 推荐 Skill |
+|-------|-----------|
+| systemd, systemctl, 服务自启动, 开机启动 | `systemd/systemd_autostart_skill.md` |
+| 服务不启动, 服务无法自启, enable, disabled | `systemd/systemd_autostart_skill.md` |
+| 重启后服务不启动, 服务不能自动恢复 | `systemd/systemd_autostart_skill.md` |
+| unit文件, service文件, daemon-reload | `systemd/systemd_autostart_skill.md` |
+
+### 4.15 连接类关键词
 
 | 关键词 | 推荐 Skill |
 |-------|-----------|
@@ -639,9 +669,11 @@ skills/
 │   └── capacity_planning_skill.md   # 容量规划 (P1)
 ├── disaster_recovery/               # 应急响应类 Skill
 │   └── incident_response_skill.md   # 故障应急响应 (P0)
-└── devops/                          # DevOps 类 Skill
-    ├── deployment_skill.md          # CI/CD 部署诊断 (P0)
-    └── config_drift_skill.md        # 配置漂移检测 (P1)
+├── devops/                          # DevOps 类 Skill
+│   ├── deployment_skill.md          # CI/CD 部署诊断 (P0)
+│   └── config_drift_skill.md        # 配置漂移检测 (P1)
+└── systemd/                         # 系统服务类 Skill
+    └── systemd_autostart_skill.md   # 服务自启动排查 (P0)
 ```
 
 ---

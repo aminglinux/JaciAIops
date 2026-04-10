@@ -96,7 +96,8 @@ class ToolRegistry:
         command: str,
         target_host: str = None,
         risk_level: str = "low",
-        timeout: int = 60
+        timeout: int = 60,
+        ssh_user: str = None
     ) -> Dict[str, Any]:
         """
         执行命令（本地或远程）
@@ -106,6 +107,7 @@ class ToolRegistry:
             target_host: 目标主机地址，为 None 时在本地执行
             risk_level: 风险等级
             timeout: 超时时间
+            ssh_user: SSH 用户名，优先级高于环境变量
             
         Returns:
             执行结果
@@ -122,12 +124,12 @@ class ToolRegistry:
         
         try:
             if target_host:
-                ssh_user = settings.SSH_USER or "root"
+                effective_ssh_user = ssh_user or settings.SSH_USER or "root"
                 ssh_opts = f"-o ConnectTimeout={settings.SSH_CONNECT_TIMEOUT}"
                 if not settings.SSH_STRICT_HOST_KEY_CHECK:
                     ssh_opts += " -o StrictHostKeyChecking=no"
                 escaped_command = shlex.quote(command)
-                ssh_command = f"ssh {ssh_opts} -i {settings.SSH_KEY_PATH} {ssh_user}@{target_host} {escaped_command}"
+                ssh_command = f"ssh {ssh_opts} -i {settings.SSH_KEY_PATH} {effective_ssh_user}@{target_host} {escaped_command}"
                 exec_command = ssh_command
             else:
                 exec_command = command
@@ -226,8 +228,8 @@ class ToolRegistry:
                 break
         
         if not is_safe_command:
-            modify_keywords = ["rm", "mv", "cp", "chmod", "chown", "kill", "pkill", 
-                            "systemctl", "service", "docker rm", "docker stop",
+            modify_keywords = ["rm", "mv", "cp", "chmod", "chown", "kill", "pkill",
+                            "service", "docker rm", "docker stop",
                             "kubectl delete", "kubectl scale"]
             for kw in modify_keywords:
                 if command_lower.startswith(kw):
@@ -235,6 +237,21 @@ class ToolRegistry:
                         "safe": False,
                         "reason": f"命令 '{kw}' 需要人工确认，请使用 ask_user_confirmation 工具"
                     }
+            
+            if command_lower.startswith("systemctl"):
+                dangerous_systemctl_actions = [
+                    "systemctl stop", "systemctl start", "systemctl restart",
+                    "systemctl reload", "systemctl kill", "systemctl isolate",
+                    "systemctl enable", "systemctl disable", "systemctl mask",
+                    "systemctl unmask", "systemctl edit", "systemctl daemon-reload",
+                    "systemctl reset-failed", "systemctl set-property"
+                ]
+                for dangerous_action in dangerous_systemctl_actions:
+                    if command_lower.startswith(dangerous_action):
+                        return {
+                            "safe": False,
+                            "reason": f"命令 '{dangerous_action}' 需要人工确认，请使用 ask_user_confirmation 工具"
+                        }
         
         return {"safe": True, "reason": "命令通过安全检查"}
     
@@ -779,6 +796,10 @@ class ToolRegistry:
                                 "type": "string",
                                 "enum": ["low", "medium", "high"],
                                 "description": "操作风险等级，默认为 low"
+                            },
+                            "ssh_user": {
+                                "type": "string",
+                                "description": "SSH 用户名，如果用户查询中提到了用户名则使用该用户名，否则使用默认配置"
                             }
                         },
                         "required": ["command"]

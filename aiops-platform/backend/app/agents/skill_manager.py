@@ -395,6 +395,18 @@ class SkillManager:
                 "本地能跑线上不行", "配置变更", "版本回退",
                 "灰度配置", "configmap", "secret", "配置热更新"
             ]
+        },
+        "systemd_autostart_skill": {
+            "path": "systemd/systemd_autostart_skill.md",
+            "category": "systemd",
+            "description": "Systemd 服务自启动故障排查",
+            "keywords": [
+                "systemd", "systemctl", "服务自启动", "开机启动",
+                "服务不启动", "服务重启", "enable", "disabled",
+                "服务恢复", "自动启动", "服务配置", "unit文件",
+                "重启后服务不启动", "服务无法自启", "systemd服务",
+                "service", "服务问题", "服务故障"
+            ]
         }
     }
     
@@ -411,7 +423,8 @@ class SkillManager:
         "cloud": "云资源类",
         "capacity": "容量类",
         "disaster_recovery": "应急响应类",
-        "devops": "DevOps类"
+        "devops": "DevOps类",
+        "systemd": "系统服务类"
     }
     
     WEIGHTED_KEYWORDS = {
@@ -957,6 +970,25 @@ class SkillManager:
                 "配置中心": 5, "spring cloud config": 4
             },
             "alias": {}
+        },
+        "systemd_autostart_skill": {
+            "core": {
+                "systemd": 10, "systemctl": 10, "服务自启动": 10,
+                "开机启动": 9, "服务不启动": 9, "服务无法自启": 9,
+                "service": 8, "服务故障": 8
+            },
+            "symptom": {
+                "服务重启后不启动": 10, "重启后服务不启动": 10,
+                "服务不能自动恢复": 9, "enable失败": 8,
+                "服务启动失败": 8, "服务inactive": 8,
+                "服务disabled": 8, "服务masked": 8,
+                "服务问题": 7, "服务异常": 7
+            },
+            "component": {
+                "unit文件": 5, "service文件": 5, "systemd服务": 6,
+                "daemon-reload": 5, "journalctl": 5
+            },
+            "alias": {}
         }
     }
     
@@ -1187,6 +1219,22 @@ class SkillManager:
         if "redis" in combined_text and "mysql" not in combined_text:
             scores["redis_skill"] += 10
         
+        if "systemd" in combined_text or "systemctl" in combined_text:
+            scores["systemd_autostart_skill"] += 15
+        if "服务自启动" in combined_text or "开机启动" in combined_text:
+            scores["systemd_autostart_skill"] += 12
+        if "服务重启后" in combined_text and "不" in combined_text:
+            scores["systemd_autostart_skill"] += 10
+        
+        import re
+        ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+        has_ip = re.search(ip_pattern, combined_text)
+        has_server_keyword = any(kw in combined_text for kw in ["服务器", "server", "主机", "host", "linux", "阿里云", "aliyun", "ecs"])
+        
+        if has_ip or has_server_keyword:
+            scores["login_skill"] += 20
+            matched_keywords["login_skill"].add("远程服务器" if has_server_keyword else "IP地址")
+        
         if not scores:
             return ["debug_skill"]
         
@@ -1257,6 +1305,32 @@ class SkillManager:
                     if keyword.lower() in expanded_text:
                         scores[skill_name] += weight
                         matched_keywords[skill_name][category].append(f"{keyword}({weight})")
+        
+        if "systemd" in combined_text or "systemctl" in combined_text:
+            scores["systemd_autostart_skill"] += 15
+        if "服务自启动" in combined_text or "开机启动" in combined_text:
+            scores["systemd_autostart_skill"] += 12
+        if "服务重启后" in combined_text and "不" in combined_text:
+            scores["systemd_autostart_skill"] += 10
+        if "java" in combined_text or "jvm" in combined_text:
+            scores["jvm_skill"] += 15
+        if "kafka" in combined_text:
+            scores["kafka_skill"] += 10
+        if "nginx" in combined_text:
+            scores["nginx_skill"] += 10
+        if "rabbitmq" in combined_text:
+            scores["rabbitmq_skill"] += 10
+        if "elasticsearch" in combined_text or "es集群" in combined_text:
+            scores["elasticsearch_skill"] += 10
+        
+        import re
+        ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+        has_ip = re.search(ip_pattern, combined_text)
+        has_server_keyword = any(kw in combined_text for kw in ["服务器", "server", "主机", "host", "linux", "阿里云", "aliyun", "ecs"])
+        
+        if has_ip or has_server_keyword:
+            scores["login_skill"] += 20
+            matched_keywords["login_skill"]["component"].append("远程服务器(20)" if has_server_keyword else "IP地址(20)")
         
         sorted_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
         

@@ -8,6 +8,46 @@
 
 ---
 
+## 0. SSH 连接前置检查（必须首先执行）
+
+### 0.1 检查用户名是否已知
+
+在尝试 SSH 连接之前，必须确认以下信息：
+
+| 信息 | 来源 | 检查方式 |
+|------|------|----------|
+| SSH 用户名 | 用户查询中的 `ssh_users` 字段 | 检查 intent_data.entities.ssh_users |
+| SSH 用户名 | 环境变量 `SSH_USER` | 检查是否配置 |
+| 目标主机 IP | 用户查询中的 `IP` 或 `SERVER` 实体 | 检查 intent_data.entities.servers |
+
+### 0.2 用户名缺失时的处理
+
+**重要**: 当用户查询中没有提供 SSH 用户名时：
+
+1. **不要猜测用户名**（如 root, admin 等）
+2. **应该询问用户**：使用 `ask_user_confirmation` 工具询问用户名
+3. **询问示例**：
+   ```
+   "需要连接服务器 47.114.77.62 进行诊断，请提供 SSH 登录用户名："
+   ```
+
+### 0.3 正确的 SSH 连接流程
+
+```
+1. 检查 intent_data.entities.ssh_users 是否有值
+   ├─ 有值 → 使用该用户名调用 execute_command
+   └─ 无值 → 询问用户获取用户名
+
+2. 调用 execute_command 时必须传递 ssh_user 参数：
+   execute_command(
+       command="systemctl status xxx",
+       target_host="47.114.77.62",
+       ssh_user="jaci"  # 从用户查询中提取或询问获得
+   )
+```
+
+---
+
 ## 1. 操作系统与虚拟机 (Linux/VM/Host)
 
 ### 1.1 标准主机 SSH 连接

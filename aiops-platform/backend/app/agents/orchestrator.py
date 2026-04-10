@@ -253,13 +253,15 @@ class MultiAgentOrchestrator:
         intent_result = await self.intent_agent.parse(user_query)
         entities = await self.intent_agent.extract_entities(user_query)
         
+        entities_dict = entities.model_dump() if hasattr(entities, 'model_dump') else entities
+        
         return {
-            "intent": intent_result.get("intent"),
-            "confidence": intent_result.get("confidence"),
-            "entities": entities,
-            "normalized_query": intent_result.get("normalized_query"),
-            "ner_entities": intent_result.get("ner_entities", []),
-            "keywords": intent_result.get("keywords", [])
+            "intent": intent_result.intent,
+            "confidence": intent_result.confidence,
+            "entities": entities_dict,
+            "normalized_query": intent_result.normalized_query,
+            "ner_entities": [e.model_dump() if hasattr(e, 'model_dump') else e for e in intent_result.ner_entities],
+            "keywords": intent_result.keywords
         }
     
     async def _execute_diagnosis_plan(

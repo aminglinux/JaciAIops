@@ -27,6 +27,7 @@ class EntitiesResult(BaseModel):
     databases: List[NEREntity] = Field(default_factory=list)
     metrics: List[NEREntity] = Field(default_factory=list)
     actions: List[NEREntity] = Field(default_factory=list)
+    ssh_users: List[NEREntity] = Field(default_factory=list)
     intent: Optional[str] = None
     confidence: Optional[str] = None
 

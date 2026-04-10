@@ -275,6 +275,33 @@ reasoning: "根据 mysql_deadlock_skill，先获取死锁日志，再检查当�
 
 ---
 
+## SSH 连接参数说明
+
+当用户查询中包含 SSH 用户名时（如"用户名是jaci"、"登录ID是xxx"），意图识别结果中会有 `ssh_users` 字段。
+
+**重要**: 在调用 `execute_command` 工具时，如果需要远程连接服务器：
+
+### 情况 1: 用户查询中包含用户名
+检查 `intent_data.entities.ssh_users` 是否有值：
+- 如果有，使用 `ssh_user` 参数传递用户名
+- 示例: `execute_command(command="systemctl status xxx", target_host="47.114.77.62", ssh_user="jaci")`
+
+### 情况 2: 用户查询中不包含用户名
+**绝对禁止猜测用户名（如 root, admin 等）！**
+
+正确做法：
+1. 使用 `ask_user_confirmation` 工具询问用户
+2. 询问内容示例：
+   ```json
+   {{
+     "message": "需要连接服务器 47.114.77.62 进行诊断，请提供 SSH 登录用户名：",
+     "options": ["root", "admin", "其他用户名"]
+   }}
+   ```
+3. 获取用户确认后，再调用 `execute_command`
+
+---
+
 ## 重要规则
 
 1. **安全第一**: 任何操作前先考虑安全性

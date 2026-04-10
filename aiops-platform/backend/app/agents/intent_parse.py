@@ -29,16 +29,17 @@ class IntentParseAgent:
 1. **SERVICE**: 服务名称（如 order-service, payment-service, nginx, mysql）
 2. **SERVER**: 服务器/主机名（如 prod-server-01, 8.136.226.231）
 3. **IP**: IP 地址
-4. **LOAD_BALANCER**: 负载均衡器实例 ID（阿里云格式：lb- 开头，如 lb-bp1bxqgw0jflid09i6xnq）
-5. **ECS_INSTANCE**: ECS 实例 ID（阿里云格式：i- 开头，如 i-bp14cdse1t3ahqrkuooe）
-6. **SYMPTOM**: 故障现象（如 超时, OOM, 重启, 连接失败, CPU飙高）
-7. **TIME**: 时间描述（如 刚才, 最近1小时, 今天上午）
-8. **DATABASE**: 数据库（如 mysql, redis, postgres）
-9. **METRIC**: 指标名称（如 CPU, 内存, 连接池, 延迟）
-10. **ACTION**: 操作动作（如 重启, 扩容, 回滚, 查询）
-11. **LOG_TYPE**: 日志类型（如 应用日志, 系统日志, 错误日志, 访问日志）
-12. **ANALYSIS_TYPE**: 分析类型（如 异常检测, 根因分析, 趋势分析, 预测）
-13. **TIME_SERIES**: 时间序列相关（如 时间序列, 时序数据, 历史数据）
+4. **SSH_USER**: SSH 登录用户名（如 root, admin, jaci, ubuntu）
+5. **LOAD_BALANCER**: 负载均衡器实例 ID（阿里云格式：lb- 开头，如 lb-bp1bxqgw0jflid09i6xnq）
+6. **ECS_INSTANCE**: ECS 实例 ID（阿里云格式：i- 开头，如 i-bp14cdse1t3ahqrkuooe）
+7. **SYMPTOM**: 故障现象（如 超时, OOM, 重启, 连接失败, CPU飙高）
+8. **TIME**: 时间描述（如 刚才, 最近1小时, 今天上午）
+9. **DATABASE**: 数据库（如 mysql, redis, postgres）
+10. **METRIC**: 指标名称（如 CPU, 内存, 连接池, 延迟）
+11. **ACTION**: 操作动作（如 重启, 扩容, 回滚, 查询）
+12. **LOG_TYPE**: 日志类型（如 应用日志, 系统日志, 错误日志, 访问日志）
+13. **ANALYSIS_TYPE**: 分析类型（如 异常检测, 根因分析, 趋势分析, 预测）
+14. **TIME_SERIES**: 时间序列相关（如 时间序列, 时序数据, 历史数据）
 
 **重要提示**：
 - 阿里云资源 ID 格式识别：
@@ -46,6 +47,9 @@ class IntentParseAgent:
   - ECS 实例：i- 开头（如 i-bp14cdse1t3ahqrkuooe）
   - 安全组：sg- 开头
   - 这些是实例 ID，不是域名，不要误识别为 SERVER 或其他类型
+- SSH_USER 识别：
+  - 当用户说"用户名是xxx"、"登录ID是xxx"、"用xxx用户登录"时，提取用户名
+  - 常见用户名：root, admin, ubuntu, centos, ec2-user, jaci 等
 
 用户输入：{user_input}
 
@@ -167,6 +171,7 @@ Output Format (纯 JSON):
             databases=entities_by_type.get("DATABASE", []),
             metrics=entities_by_type.get("METRIC", []),
             actions=entities_by_type.get("ACTION", []),
+            ssh_users=entities_by_type.get("SSH_USER", []),
             intent=result.intent,
             confidence=result.confidence,
         )
