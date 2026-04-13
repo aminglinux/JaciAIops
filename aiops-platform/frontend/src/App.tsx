@@ -1,11 +1,10 @@
 import { useState } from 'react';
-import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Layout, Menu, Dropdown, Avatar, Space, Spin } from 'antd';
 import {
   DashboardOutlined,
   FileTextOutlined,
   BugOutlined,
-  QuestionCircleOutlined,
   ApiOutlined,
   CodeOutlined,
   UserOutlined,
@@ -16,7 +15,6 @@ import {
 import Dashboard from './pages/Dashboard';
 import LogList from './pages/LogList';
 import Diagnose from './pages/Diagnose';
-import QA from './pages/QA';
 import KnowledgeGraph from './pages/KnowledgeGraph';
 import Terminal from './pages/Terminal';
 import ModelHub from './pages/ModelHub';
@@ -25,6 +23,7 @@ import Register from './pages/Register';
 import { TerminalProvider } from './contexts/TerminalContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import PrivateRoute from './components/PrivateRoute';
+import AssistantWidget from './components/AssistantWidget';
 
 const { Header, Content, Sider } = Layout;
 
@@ -33,7 +32,6 @@ const menuItems = [
   { key: '/logs', icon: <FileTextOutlined />, label: '日志列表', path: '/logs', permission: 'logs:view' },
   { key: '/diagnose', icon: <BugOutlined />, label: '故障诊断', path: '/diagnose', permission: 'diagnose:view' },
   { key: '/knowledge', icon: <ApiOutlined />, label: '知识库', path: '/knowledge', permission: 'knowledge:view' },
-  { key: '/qa', icon: <QuestionCircleOutlined />, label: '智能问答', path: '/qa', permission: 'qa:view' },
   { key: '/models', icon: <SettingOutlined />, label: '模型管理', path: '/models', permission: null, adminOnly: true },
   { key: '/terminal', icon: <CodeOutlined />, label: 'Web终端', path: '/terminal', permission: 'terminal:access', adminOnly: true },
 ];
@@ -173,11 +171,7 @@ const AppContent = () => {
                     <KnowledgeGraph />
                   </PrivateRoute>
                 } />
-                <Route path="/qa" element={
-                  <PrivateRoute requiredPermission="qa:view">
-                    <QA />
-                  </PrivateRoute>
-                } />
+                <Route path="/qa" element={<Navigate to="/" replace />} />
                 <Route path="/models" element={
                   <PrivateRoute requireAdmin>
                     <ModelHub />
@@ -187,6 +181,7 @@ const AppContent = () => {
             </div>
           )}
         </Content>
+        {(isAdmin || hasPermission('qa:view')) && <AssistantWidget />}
       </Layout>
     </Layout>
   );

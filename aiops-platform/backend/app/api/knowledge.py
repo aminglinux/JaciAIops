@@ -1,11 +1,14 @@
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 from neo4j import GraphDatabase
 import re
+import json
 
 from app.core.config import settings
+from app.services import llm_config_manager
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -293,13 +296,100 @@ async def get_topology(service: str = None, depth: int = 2):
         }
 
 @router.get("/qa/chat")
-async def chat_with_knowledge(question: str):
+async def chat_with_knowledge(question: str, analyze_problem: bool = False):
+    return await _build_chat_response(question, analyze_problem)
+
+
+@router.get("/qa/chat/stream")
+async def chat_with_knowledge_stream(question: str, analyze_problem: bool = False):
+    async def event_generator():
+        result = await _build_chat_response(question, analyze_problem)
+        meta_payload = {
+            "type": "meta",
+            "mode": result.get("mode"),
+            "intent": result.get("intent"),
+            "knowledge": result.get("knowledge"),
+            "rag_context": result.get("rag_context"),
+        }
+        yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
+
+        answer = result.get("answer", "") or ""
+        chunk_size = 24
+        for index in range(0, len(answer), chunk_size):
+            delta_payload = {
+                "type": "delta",
+                "content": answer[index:index + chunk_size],
+            }
+            yield f"data: {json.dumps(delta_payload, ensure_ascii=False)}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _build_chat_response(question: str, analyze_problem: bool = False) -> Dict[str, Any]:
     from app.agents import IntentParseAgent, KnowledgeExpertAgent
-    
+
+    if not analyze_problem:
+        answer, rag_context = await _general_chat(question)
+        return {
+            "question": question,
+            "mode": "general_chat",
+            "intent": {
+                "intent": "GENERAL_QA",
+                "confidence": "MEDIUM",
+                "entities": {},
+                "normalized_query": question,
+                "ner_entities": [],
+                "keywords": [],
+                "clarification_needed": False,
+            },
+            "knowledge": None,
+            "rag_context": rag_context,
+            "answer": answer,
+        }
+
+    if _is_simple_chat_text(question):
+        return {
+            "question": question,
+            "mode": "general_chat",
+            "intent": {
+                "intent": "GENERAL_QA",
+                "confidence": "HIGH",
+                "entities": {},
+                "normalized_query": question,
+                "ner_entities": [],
+                "keywords": [],
+                "clarification_needed": False,
+            },
+            "knowledge": None,
+            "rag_context": "",
+            "answer": _build_simple_chat_response(question),
+        }
+
     intent_agent = IntentParseAgent()
     knowledge_agent = KnowledgeExpertAgent()
-    
-    intent = await intent_agent.parse(question)
+
+    try:
+        intent = await intent_agent.parse(question)
+    except Exception:
+        return {
+            "question": question,
+            "mode": "analysis",
+            "intent": {
+                "intent": "GENERAL_QA",
+                "confidence": "LOW",
+                "entities": {},
+                "normalized_query": question,
+                "ner_entities": [],
+                "keywords": [],
+                "clarification_needed": False,
+            },
+            "knowledge": None,
+            "rag_context": "",
+            "answer": "我暂时无法完成深度检索，但可以先陪你做简单交流。若你要排查问题，请补充服务名、异常现象或日志关键词。",
+        }
+
     service = intent.entities.get("service", "unknown")
     symptom = intent.entities.get("symptom", "unknown")
 
@@ -307,6 +397,7 @@ async def chat_with_knowledge(question: str):
         answer = _build_simple_chat_response(question)
         return {
             "question": question,
+            "mode": "general_chat",
             "intent": intent.model_dump(),
             "knowledge": None,
             "rag_context": "",
@@ -319,6 +410,7 @@ async def chat_with_knowledge(question: str):
 
     return {
         "question": question,
+        "mode": "analysis",
         "intent": intent.model_dump(),
         "knowledge": knowledge.model_dump(),
         "rag_context": rag_answer,
@@ -341,7 +433,45 @@ async def _query_rag_for_context(question: str) -> str:
     return ""
 
 
-def _is_simple_chat(question: str, intent) -> bool:
+async def _general_chat(question: str) -> tuple[str, str]:
+    if _is_simple_chat_text(question):
+        return _build_simple_chat_response(question), ""
+
+    rag_context = await _query_rag_for_context(question)
+    prompt = _build_general_chat_prompt(question, rag_context)
+
+    try:
+        client, llm_config = llm_config_manager.get_client_for_scene("general_chat")
+        response = client.chat.completions.create(
+            model=llm_config.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=llm_config.temperature,
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        if answer:
+            return answer, rag_context
+    except Exception:
+        pass
+
+    if rag_context:
+        return rag_context, rag_context
+
+    return _build_simple_chat_response(question), ""
+
+
+def _build_general_chat_prompt(question: str, rag_context: str) -> str:
+    context_block = f"\n参考知识：{rag_context}\n" if rag_context else "\n当前没有检索到额外知识上下文。\n"
+    return (
+        "你是 AIOps 平台里的通用问答助手。"
+        "请优先用自然、简洁、友好的方式回答。"
+        "如果用户问题明显是运维分析类，但当前不是分析模式，也要先正常回答，"
+        "并在合适时提醒用户可以打开“分析问题”开关获取更深入的定位建议。"
+        f"{context_block}\n"
+        f"用户问题：{question}"
+    )
+
+
+def _is_simple_chat_text(question: str) -> bool:
     normalized = question.strip().lower()
     if not normalized:
         return True
@@ -349,10 +479,16 @@ def _is_simple_chat(question: str, intent) -> bool:
     greeting_patterns = [
         r"^(hi|hello|hey)\b",
         r"^(你好|您好|嗨|哈喽)",
+        r"^(在吗|在不在)$",
         r"(你是谁|你能做什么|帮助|help)$",
         r"^(早上好|中午好|下午好|晚上好)$",
     ]
-    if any(re.search(pattern, normalized) for pattern in greeting_patterns):
+    return any(re.search(pattern, normalized) for pattern in greeting_patterns)
+
+
+def _is_simple_chat(question: str, intent) -> bool:
+    normalized = question.strip().lower()
+    if _is_simple_chat_text(question):
         return True
 
     has_entities = bool(intent.entities)

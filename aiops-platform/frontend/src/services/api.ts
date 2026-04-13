@@ -18,6 +18,7 @@ import type {
   ModelFormValues,
   ProviderFormValues,
   DiscoveredModel,
+  LLMRuntimeConfig,
 } from '../types';
 
 const api = axios.create({
@@ -136,8 +137,8 @@ export const knowledgeApi = {
     return response.data;
   },
 
-  chat: async (question: string): Promise<unknown> => {
-    const response = await api.get('/knowledge/qa/chat', { params: { question } });
+  chat: async (question: string, analyzeProblem: boolean = false): Promise<unknown> => {
+    const response = await api.get('/knowledge/qa/chat', { params: { question, analyze_problem: analyzeProblem } });
     return response.data;
   },
 
@@ -203,6 +204,11 @@ export const llmApi = {
 
   getBindings: async (): Promise<{ scenes: unknown[]; bindings: LLMBinding[] }> => {
     const response = await api.get<ApiResponse<{ scenes: unknown[]; bindings: LLMBinding[] }>>('/llm/bindings');
+    return response.data.data;
+  },
+
+  getRuntimeConfig: async (): Promise<LLMRuntimeConfig> => {
+    const response = await api.get<ApiResponse<LLMRuntimeConfig>>('/llm/runtime-config');
     return response.data.data;
   },
 

@@ -275,3 +275,21 @@ export interface DiscoveredModel {
   supportsJsonMode: boolean;
   modelType: string;
 }
+
+export interface LLMRuntimeBinding {
+  sceneKey: string;
+  displayName: string;
+  providerName: string;
+  model: string;
+  source: string;
+  temperature: number;
+  supportsFunctionCalling: boolean;
+}
+
+export interface LLMRuntimeConfig {
+  bindings: LLMRuntimeBinding[];
+  fallback: {
+    baseUrl: string;
+    model: string;
+  };
+}
