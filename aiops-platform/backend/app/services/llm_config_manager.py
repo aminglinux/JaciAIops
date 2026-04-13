@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -45,10 +44,6 @@ class ResolvedLLMConfig:
 
 
 class LLMConfigManager:
-    def __init__(self):
-        self._backend_root = Path(__file__).resolve().parents[2]
-        self._env_path = self._backend_root / ".env"
-
     def _get_fernet(self) -> Fernet:
         seed = settings.SECRET_KEY or "aiops-platform-dev-secret"
         digest = hashlib.sha256(seed.encode("utf-8")).digest()
@@ -594,54 +589,6 @@ class LLMConfigManager:
             "updated": updated,
             "skipped": skipped,
             "totalSelected": len(discovered_models),
-        }
-
-    def sync_env(self, db: Session, operator: str) -> Dict[str, Any]:
-        binding = db.query(LLMSceneBinding).filter(
-            LLMSceneBinding.scene_key == "master_planner",
-            LLMSceneBinding.enabled.is_(True),
-        ).first()
-        if binding is None:
-            raise ValueError("未找到 master_planner 场景绑定")
-        model = db.query(LLMModel).filter(LLMModel.id == binding.model_id).first()
-        provider = db.query(LLMProvider).filter(LLMProvider.id == model.provider_id).first() if model else None
-        if model is None or provider is None:
-            raise ValueError("绑定模型或 Provider 不存在")
-
-        target_values = {
-            "OPENAI_API_KEY": self.decrypt_api_key(provider.api_key_encrypted),
-            "OPENAI_BASE_URL": provider.base_url,
-            "OPENAI_MODEL": model.model_id,
-        }
-
-        existing_lines: List[str] = []
-        if self._env_path.exists():
-            existing_lines = self._env_path.read_text(encoding="utf-8").splitlines()
-
-        seen = set()
-        updated_lines = []
-        for line in existing_lines:
-            if "=" not in line or line.strip().startswith("#"):
-                updated_lines.append(line)
-                continue
-            key, _ = line.split("=", 1)
-            if key in target_values:
-                updated_lines.append(f"{key}={target_values[key]}")
-                seen.add(key)
-            else:
-                updated_lines.append(line)
-
-        for key, value in target_values.items():
-            if key not in seen:
-                updated_lines.append(f"{key}={value}")
-
-        self._env_path.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
-        self._write_audit_log(db, operator, "sync_env", "env", str(self._env_path), {"keys": list(target_values.keys())})
-        db.commit()
-        return {
-            "success": True,
-            "envPath": str(self._env_path),
-            "syncedKeys": list(target_values.keys()),
         }
 
     def _write_audit_log(self, db: Session, operator: str, action: str, target_type: str, target_id: str, detail: Dict[str, Any]):

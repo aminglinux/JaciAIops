@@ -16,7 +16,7 @@ import {
   Tag,
   message,
 } from 'antd';
-import { ApiOutlined, CloudSyncOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ApiOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 
 import { llmApi } from '../services/api';
 import type {
@@ -242,15 +242,6 @@ const ModelHub = () => {
     }
   };
 
-  const syncEnv = async () => {
-    try {
-      const result = await llmApi.syncEnv();
-      message.success(`已同步到 ${result.envPath}`);
-    } catch (error) {
-      message.error('同步 .env 失败');
-    }
-  };
-
   const providerColumns = [
     { title: '名称', dataIndex: 'name', key: 'name' },
     { title: '编码', dataIndex: 'providerCode', key: 'providerCode' },
@@ -352,7 +343,6 @@ const ModelHub = () => {
         title={<Space><ApiOutlined />平台模型管理</Space>}
         extra={
           <Space>
-            <Button icon={<CloudSyncOutlined />} onClick={syncEnv}>同步到 .env</Button>
             <Button icon={<ReloadOutlined />} onClick={fetchData}>刷新</Button>
           </Space>
         }

@@ -211,10 +211,6 @@ export const llmApi = {
     return response.data.data;
   },
 
-  syncEnv: async (): Promise<{ success: boolean; envPath: string; syncedKeys: string[] }> => {
-    const response = await api.post<ApiResponse<{ success: boolean; envPath: string; syncedKeys: string[] }>>('/llm/sync-env');
-    return response.data.data;
-  },
 };
 
 export const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/logs/ws/simulate`;

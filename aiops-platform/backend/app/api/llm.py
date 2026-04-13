@@ -256,14 +256,3 @@ def update_binding(
 def get_runtime_config(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"code": 200, "message": "success", "data": llm_config_manager.get_runtime_config_summary(db)}
 
-
-@router.post("/sync-env", response_model=dict)
-def sync_env(
-    current_user: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    try:
-        result = llm_config_manager.sync_env(db, current_user.username)
-        return {"code": 200, "message": "同步成功", "data": result}
-    except ValueError as exc:
-        _handle_value_error(exc)
