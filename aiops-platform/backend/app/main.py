@@ -6,7 +6,6 @@ import logging
 from app.core.config import settings, validate_security_settings
 from app.core.database import init_db
 from app.api import api_router
-from app.api.terminal import websocket_terminal
 from app.api.auth import router as auth_router, create_default_users
 from app.api.approval import router as approval_router
 from app.agents.knowledge import KnowledgeExpertAgent
@@ -46,8 +45,6 @@ app.add_middleware(
 app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(approval_router)
-
-app.add_api_websocket_route("/ws/terminal", websocket_terminal)
 
 @app.get("/")
 async def root():

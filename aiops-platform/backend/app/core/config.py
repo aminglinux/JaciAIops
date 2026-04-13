@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     OPENAI_MODEL: str = "qwen-plus"
+
+    TRACE_BACKEND: str = "jaeger"
+    JAEGER_QUERY_URL: str = "http://localhost:16686"
+    TEMPO_QUERY_URL: str = ""
+    TRACE_QUERY_TIMEOUT: int = 15
+    TRACE_DEFAULT_LOOKBACK_MINUTES: int = 15
+    RUNTIME_GRAPH_ENABLED: bool = True
     
     SSH_USER: str = ""
     SSH_KEY_PATH: str = os.path.expanduser("~/.ssh/id_rsa")

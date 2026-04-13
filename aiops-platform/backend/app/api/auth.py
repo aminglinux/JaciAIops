@@ -101,7 +101,6 @@ def user_to_response(user: User) -> UserResponse:
             "diagnose:view", "diagnose:execute",
             "knowledge:view", "knowledge:edit",
             "qa:view",
-            "terminal:access",
             "users:manage"
         ]
     else:

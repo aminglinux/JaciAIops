@@ -17,7 +17,7 @@ import {
 import { CloseOutlined, QuestionCircleOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
-import type { LLMRuntimeBinding } from '../types';
+import type { LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
 
 const { TextArea } = Input;
 const { Text, Paragraph } = Typography;
@@ -156,6 +156,7 @@ interface Message {
     };
     knowledge?: string;
     mode?: string;
+    runtimeTopology?: RuntimeTopologySnapshot | null;
   };
 }
 
@@ -275,6 +276,7 @@ const AssistantWidget = () => {
           mode?: string;
           intent?: { intent: string; entities: Record<string, string>; confidence: string };
           knowledge?: { knowledge_report?: string } | null;
+          runtime_topology?: RuntimeTopologySnapshot | null;
         };
 
         if (payload.type === 'meta') {
@@ -287,6 +289,7 @@ const AssistantWidget = () => {
                       intent: payload.intent,
                       knowledge: payload.knowledge?.knowledge_report,
                       mode: payload.mode,
+                      runtimeTopology: payload.runtime_topology,
                     },
                   }
                 : item
@@ -342,6 +345,7 @@ const AssistantWidget = () => {
               intent: (response as { intent?: { intent: string; entities: Record<string, string>; confidence: string } }).intent,
               knowledge: (response as { knowledge?: { knowledge_report?: string } }).knowledge?.knowledge_report,
               mode: (response as { mode?: string }).mode,
+              runtimeTopology: (response as { runtime_topology?: RuntimeTopologySnapshot | null }).runtime_topology || null,
             },
           };
           setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? updatedMessage : item)));
@@ -527,6 +531,24 @@ const AssistantWidget = () => {
                             >
                               {item.extra.knowledge}
                             </Paragraph>
+                          </div>
+                        )}
+                        {item.extra?.runtimeTopology && (
+                          <div style={{ marginTop: 10 }}>
+                            <Divider style={{ margin: '8px 0' }} />
+                            <Text type="secondary" style={{ fontSize: 12 }}>运行时拓扑：</Text>
+                            <div style={{ marginTop: 6 }}>
+                              {item.extra.runtimeTopology.downstream.slice(0, 3).map((dependency) => (
+                                <Tag key={`${dependency.source_service}-${dependency.target_service}`} color="geekblue">
+                                  {dependency.target_service} · {dependency.avg_latency_ms.toFixed(0)}ms
+                                </Tag>
+                              ))}
+                              {item.extra.runtimeTopology.anomalies.slice(0, 2).map((anomaly) => (
+                                <Tag key={`${anomaly.trace_id}-${anomaly.span_name}`} color="volcano">
+                                  {anomaly.span_name} · {anomaly.duration_ms.toFixed(0)}ms
+                                </Tag>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </>

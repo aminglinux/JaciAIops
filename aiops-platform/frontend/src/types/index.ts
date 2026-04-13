@@ -293,3 +293,82 @@ export interface LLMRuntimeConfig {
     model: string;
   };
 }
+
+export interface RuntimeServiceDependency {
+  source_service: string;
+  target_service: string;
+  dependency_type: string;
+  avg_latency_ms: number;
+  error_rate: number;
+  call_count: number;
+  last_seen?: string | null;
+  source: string;
+  details?: Record<string, unknown>;
+}
+
+export interface RuntimeTraceAnomaly {
+  service: string;
+  trace_id: string;
+  span_name: string;
+  duration_ms: number;
+  suspected_dependency?: string | null;
+  anomaly_type: string;
+  details?: Record<string, unknown>;
+}
+
+export interface RuntimeTopologySnapshot {
+  service: string;
+  window_minutes: number;
+  upstream: RuntimeServiceDependency[];
+  downstream: RuntimeServiceDependency[];
+  anomalies: RuntimeTraceAnomaly[];
+  source: string;
+}
+
+export interface RuntimeDependencyResponse {
+  service: string;
+  minutes: number;
+  dependencies: RuntimeServiceDependency[];
+}
+
+export interface RuntimeAnomalyResponse {
+  service: string;
+  minutes: number;
+  anomalies: RuntimeTraceAnomaly[];
+}
+
+export interface RuntimeGraphConfig {
+  traceBackend: string;
+  jaegerQueryUrl: string;
+  tempoQueryUrl: string;
+  traceQueryTimeout: number;
+  traceDefaultLookbackMinutes: number;
+  runtimeGraphEnabled: boolean;
+  serviceList: string[];
+  updatedBy?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface RuntimeGraphConfigPayload {
+  trace_backend: string;
+  jaeger_query_url: string;
+  tempo_query_url: string;
+  trace_query_timeout: number;
+  trace_default_lookback_minutes: number;
+  runtime_graph_enabled: boolean;
+  service_list: string[];
+}
+
+export interface ManualGraphRelationPayload {
+  target_type: string;
+  target_name: string;
+  relation_type: string;
+  target_properties?: Record<string, unknown>;
+}
+
+export interface ManualGraphEntryPayload {
+  source_type: string;
+  source_name: string;
+  source_properties?: Record<string, unknown>;
+  relation?: ManualGraphRelationPayload | null;
+}

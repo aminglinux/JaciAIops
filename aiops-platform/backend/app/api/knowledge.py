@@ -1,14 +1,18 @@
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 from neo4j import GraphDatabase
 import re
 import json
+from sqlalchemy.orm import Session
 
+from app.api.auth import User, get_current_user, require_admin
 from app.core.config import settings
-from app.services import llm_config_manager
+from app.core.database import get_db
+from app.observability import runtime_topology_service
+from app.services import llm_config_manager, runtime_graph_config_manager
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -34,6 +38,121 @@ class RAGQueryResponse(BaseModel):
     best_score: float = 0.0
     use_context: bool = False
     mode: str = "RAG"
+
+
+class RuntimeGraphConfigPayload(BaseModel):
+    trace_backend: str = "jaeger"
+    jaeger_query_url: str
+    tempo_query_url: str = ""
+    trace_query_timeout: int = 15
+    trace_default_lookback_minutes: int = 15
+    runtime_graph_enabled: bool = True
+    service_list: List[str] = []
+
+
+class ManualGraphRelationPayload(BaseModel):
+    target_type: str
+    target_name: str
+    relation_type: str
+    target_properties: Dict[str, Any] = {}
+
+
+class ManualGraphEntryPayload(BaseModel):
+    source_type: str
+    source_name: str
+    source_properties: Dict[str, Any] = {}
+    relation: Optional[ManualGraphRelationPayload] = None
+
+
+class GraphNodeUpdatePayload(BaseModel):
+    name: str
+    properties: Dict[str, Any] = {}
+
+
+class GraphRelationUpdatePayload(BaseModel):
+    relation_type: str
+    properties: Dict[str, Any] = {}
+
+
+ALLOWED_NODE_TYPES = {
+    "Service",
+    "Server",
+    "Database",
+    "Cache",
+    "MQ",
+    "Gateway",
+    "Cluster",
+    "Namespace",
+    "Application",
+    "Middleware",
+}
+
+ALLOWED_RELATION_TYPES = {
+    "DEPENDS_ON",
+    "RUNS_ON",
+    "CONNECTED_TO",
+    "CALLS",
+    "BELONGS_TO",
+    "USES_DB",
+    "USES_CACHE",
+    "USES_MQ",
+}
+
+
+def _sanitize_label(value: str, allowed_values: Optional[set[str]] = None) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise ValueError("标签不能为空")
+    if allowed_values is not None and normalized not in allowed_values:
+        raise ValueError(f"不支持的类型: {normalized}")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized):
+        raise ValueError(f"非法标签: {normalized}")
+    return normalized
+
+
+def _sanitize_properties(properties: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = {}
+    for key, value in (properties or {}).items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key)):
+            continue
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            sanitized[key] = value
+        elif isinstance(value, list) and all(isinstance(item, (str, int, float, bool)) for item in value):
+            sanitized[key] = value
+        else:
+            sanitized[key] = str(value)
+    return sanitized
+
+
+def _node_label_expression(labels: List[str]) -> str:
+    valid_labels = [_sanitize_label(label) for label in labels if str(label).strip()]
+    if not valid_labels:
+        raise ValueError("节点缺少 labels")
+    return ":" + ":".join(valid_labels)
+
+
+def _merge_node(session, node_data: Dict[str, Any], updated_by: str) -> Dict[str, Any]:
+    labels = node_data.get("labels", [])
+    if not labels:
+        raise ValueError("节点缺少 labels")
+    label_expression = _node_label_expression(labels)
+    primary_label = _sanitize_label(labels[-1])
+    properties = _sanitize_properties(dict(node_data.get("properties", {}) or {}))
+    name = str(properties.get("name", "")).strip()
+    if not name:
+        raise ValueError("节点缺少 name 属性")
+    properties["updated_by"] = updated_by
+    session.run(
+        f"""
+        MERGE (node{label_expression} {{name: $name}})
+        SET node += $properties
+        """,
+        name=name,
+        properties=properties,
+    )
+    return {"label": primary_label, "labelExpression": label_expression, "name": name, "properties": properties}
 
 def get_neo4j_driver():
     return GraphDatabase.driver(
@@ -235,21 +354,35 @@ async def get_topology(service: str = None, depth: int = 2):
             if service:
                 result = session.run(f"""
                     MATCH path = (s {{name: $name}})-[*1..{depth}]-(related)
-                    RETURN s, related, relationships(path) as rels
+                    UNWIND relationships(path) as r
+                    RETURN startNode(r) as a,
+                           endNode(r) as b,
+                           type(r) as rel_type,
+                           elementId(r) as rel_id,
+                           properties(r) as rel_props,
+                           elementId(startNode(r)) as source_id,
+                           elementId(endNode(r)) as target_id
+                    LIMIT 200
                 """, name=service)
             else:
-                result = session.run(f"""
-                    MATCH path = (a)-[r:DEPENDS_ON|RUNS_ON|CONNECTED_TO*1..{depth}]-(b)
-                    RETURN a, b, relationships(path) as rels
-                    LIMIT 50
+                result = session.run("""
+                    MATCH (a)-[r]->(b)
+                    RETURN a,
+                           b,
+                           type(r) as rel_type,
+                           elementId(r) as rel_id,
+                           properties(r) as rel_props,
+                           elementId(startNode(r)) as source_id,
+                           elementId(endNode(r)) as target_id
+                    LIMIT 200
                 """)
             
             nodes = {}
             edges = []
             
             for record in result:
-                source = record.get("s") or record.get("a")
-                target = record.get("related") or record.get("b")
+                source = record.get("a")
+                target = record.get("b")
                 
                 if source:
                     source_id = source.element_id
@@ -271,12 +404,13 @@ async def get_topology(service: str = None, depth: int = 2):
                             "properties": dict(target)
                         }
                 
-                rels = record.get("rels", [])
-                for rel in rels:
+                if record.get("source_id") and record.get("target_id"):
                     edges.append({
-                        "source": rel.start_node.element_id if hasattr(rel, 'start_node') else None,
-                        "target": rel.end_node.element_id if hasattr(rel, 'end_node') else None,
-                        "type": rel.type
+                        "id": record.get("rel_id") if record.get("rel_id") else None,
+                        "source": record.get("source_id"),
+                        "target": record.get("target_id"),
+                        "type": record.get("rel_type"),
+                        "properties": dict(record.get("rel_props") or {}),
                     })
         
         driver.close()
@@ -295,6 +429,346 @@ async def get_topology(service: str = None, depth: int = 2):
             "source": "error"
         }
 
+
+@router.get("/runtime-config", response_model=dict)
+def get_runtime_graph_config(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {
+        "code": 200,
+        "message": "success",
+        "data": runtime_graph_config_manager.get_config(db),
+    }
+
+
+@router.put("/runtime-config", response_model=dict)
+def update_runtime_graph_config(
+    payload: RuntimeGraphConfigPayload,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        result = runtime_graph_config_manager.update_config(db, payload.model_dump(), current_user.username)
+        return {"code": 200, "message": "更新成功", "data": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/manual-entry", response_model=dict)
+def create_manual_graph_entry(
+    payload: ManualGraphEntryPayload,
+    current_user: User = Depends(require_admin),
+):
+    source_type = payload.source_type.strip()
+    if source_type not in ALLOWED_NODE_TYPES:
+        raise HTTPException(status_code=400, detail="不支持的源节点类型")
+
+    relation = payload.relation
+    if relation:
+        if relation.target_type.strip() not in ALLOWED_NODE_TYPES:
+            raise HTTPException(status_code=400, detail="不支持的目标节点类型")
+        if relation.relation_type.strip() not in ALLOWED_RELATION_TYPES:
+            raise HTTPException(status_code=400, detail="不支持的关系类型")
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            session.run(
+                f"""
+                MERGE (source:{source_type} {{name: $source_name}})
+                SET source += $source_properties
+                SET source.updated_by = $updated_by
+                RETURN source
+                """,
+                source_name=payload.source_name.strip(),
+                source_properties=payload.source_properties,
+                updated_by=current_user.username,
+            )
+
+            if relation:
+                target_type = relation.target_type.strip()
+                relation_type = relation.relation_type.strip()
+                session.run(
+                    f"""
+                    MERGE (source:{source_type} {{name: $source_name}})
+                    SET source += $source_properties
+                    MERGE (target:{target_type} {{name: $target_name}})
+                    SET target += $target_properties
+                    MERGE (source)-[rel:{relation_type}]->(target)
+                    SET rel.updated_by = $updated_by
+                    RETURN source, rel, target
+                    """,
+                    source_name=payload.source_name.strip(),
+                    source_properties=payload.source_properties,
+                    target_name=relation.target_name.strip(),
+                    target_properties=relation.target_properties,
+                    updated_by=current_user.username,
+                )
+        driver.close()
+        return {
+            "code": 200,
+            "message": "录入成功",
+            "data": {
+                "source": payload.source_name.strip(),
+                "sourceType": source_type,
+                "relationCreated": bool(relation),
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"写入知识图谱失败: {exc}") from exc
+
+
+@router.put("/nodes/{node_id}", response_model=dict)
+def update_graph_node(
+    node_id: str,
+    payload: GraphNodeUpdatePayload,
+    current_user: User = Depends(require_admin),
+):
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            properties = _sanitize_properties(payload.properties)
+            properties["name"] = payload.name.strip()
+            properties["updated_by"] = current_user.username
+            record = session.run(
+                """
+                MATCH (n)
+                WHERE elementId(n) = $node_id
+                SET n += $properties
+                RETURN elementId(n) as id, labels(n) as labels, properties(n) as props
+                """,
+                node_id=node_id,
+                properties=properties,
+            ).single()
+        driver.close()
+        if not record:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        return {
+            "code": 200,
+            "message": "更新成功",
+            "data": {
+                "id": record["id"],
+                "type": record["labels"][-1] if record["labels"] else "Node",
+                "properties": record["props"],
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"更新节点失败: {exc}") from exc
+
+
+@router.delete("/nodes/{node_id}", response_model=dict)
+def delete_graph_node(
+    node_id: str,
+    _: User = Depends(require_admin),
+):
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (n)
+                WHERE elementId(n) = $node_id
+                WITH n, properties(n) as props
+                DETACH DELETE n
+                RETURN props.name as name
+                """,
+                node_id=node_id,
+            ).single()
+        driver.close()
+        if not record:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        return {"code": 200, "message": "删除成功", "data": {"name": record["name"]}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除节点失败: {exc}") from exc
+
+
+@router.put("/relations/{relation_id}", response_model=dict)
+def update_graph_relation(
+    relation_id: str,
+    payload: GraphRelationUpdatePayload,
+    current_user: User = Depends(require_admin),
+):
+    try:
+        relation_type = _sanitize_label(payload.relation_type)
+        properties = _sanitize_properties(payload.properties)
+        properties["updated_by"] = current_user.username
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (source)-[r]->(target)
+                WHERE elementId(r) = $relation_id
+                RETURN source, target, properties(r) as props
+                """,
+                relation_id=relation_id,
+            ).single()
+            if not record:
+                driver.close()
+                raise HTTPException(status_code=404, detail="关系不存在")
+
+            source = record["source"]
+            target = record["target"]
+            source_id = source.element_id
+            target_id = target.element_id
+            source_name = dict(source).get("name")
+            target_name = dict(target).get("name")
+            created = session.run(
+                f"""
+                MATCH (source), (target)
+                WHERE elementId(source) = $source_id AND elementId(target) = $target_id
+                MATCH (source)-[old]->(target)
+                WHERE elementId(old) = $relation_id
+                DELETE old
+                CREATE (source)-[new_rel:{relation_type}]->(target)
+                SET new_rel += $properties
+                RETURN elementId(new_rel) as id, type(new_rel) as rel_type, properties(new_rel) as rel_props
+                """,
+                relation_id=relation_id,
+                source_id=source_id,
+                target_id=target_id,
+                properties=properties,
+            ).single()
+        driver.close()
+        return {
+            "code": 200,
+            "message": "更新成功",
+            "data": {
+                "id": created["id"],
+                "type": created["rel_type"],
+                "properties": created["rel_props"],
+                "sourceName": source_name,
+                "targetName": target_name,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"更新关系失败: {exc}") from exc
+
+
+@router.delete("/relations/{relation_id}", response_model=dict)
+def delete_graph_relation(
+    relation_id: str,
+    _: User = Depends(require_admin),
+):
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (source)-[r]->(target)
+                WHERE elementId(r) = $relation_id
+                WITH source, target, type(r) as rel_type, r
+                DELETE r
+                RETURN properties(source).name as source_name,
+                       properties(target).name as target_name,
+                       rel_type
+                """,
+                relation_id=relation_id,
+            ).single()
+        driver.close()
+        if not record:
+            raise HTTPException(status_code=404, detail="关系不存在")
+        return {
+            "code": 200,
+            "message": "删除成功",
+            "data": {
+                "sourceName": record["source_name"],
+                "targetName": record["target_name"],
+                "type": record["rel_type"],
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除关系失败: {exc}") from exc
+
+
+@router.post("/import-data", response_model=dict)
+async def import_graph_data(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+):
+    if not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="仅支持导入 JSON 文件")
+
+    try:
+        content = await file.read()
+        payload = json.loads(content.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"解析 JSON 失败: {exc}") from exc
+
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=400, detail="导入内容必须是数组")
+
+    imported_nodes: set[tuple[str, str]] = set()
+    imported_relations = 0
+    failed_records = []
+
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            for index, item in enumerate(payload, start=1):
+                if not isinstance(item, dict):
+                    failed_records.append({"index": index, "error": "记录不是对象"})
+                    continue
+                source_data = item.get("n")
+                relation_data = item.get("r")
+                target_data = item.get("m")
+                if not source_data or not relation_data or not target_data:
+                    failed_records.append({"index": index, "error": "记录缺少 n/r/m"})
+                    continue
+
+                try:
+                    source_node = _merge_node(session, source_data, current_user.username)
+                    target_node = _merge_node(session, target_data, current_user.username)
+                    imported_nodes.add((source_node["label"], source_node["name"]))
+                    imported_nodes.add((target_node["label"], target_node["name"]))
+
+                    relation_type = _sanitize_label(str(relation_data.get("type", "")))
+                    relation_properties = _sanitize_properties(dict(relation_data.get("properties", {}) or {}))
+                    relation_properties["updated_by"] = current_user.username
+                    session.run(
+                        f"""
+                        MATCH (source{source_node['labelExpression']} {{name: $source_name}})
+                        MATCH (target{target_node['labelExpression']} {{name: $target_name}})
+                        MERGE (source)-[rel:{relation_type}]->(target)
+                        SET rel += $relation_properties
+                        """,
+                        source_name=source_node["name"],
+                        target_name=target_node["name"],
+                        relation_properties=relation_properties,
+                    )
+                    imported_relations += 1
+                except Exception as record_exc:
+                    failed_records.append({"index": index, "error": str(record_exc)})
+        driver.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"导入知识图谱失败: {exc}") from exc
+
+    if imported_relations == 0 and failed_records:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未导入任何关系，首个错误: 第 {failed_records[0]['index']} 条 - {failed_records[0]['error']}",
+        )
+
+    return {
+        "code": 200,
+        "message": "导入成功" if not failed_records else "部分导入成功",
+        "data": {
+            "fileName": file.filename,
+            "records": len(payload),
+            "nodes": len(imported_nodes),
+            "relations": imported_relations,
+            "failed": len(failed_records),
+            "errors": failed_records[:10],
+        },
+    }
+
 @router.get("/qa/chat")
 async def chat_with_knowledge(question: str, analyze_problem: bool = False):
     return await _build_chat_response(question, analyze_problem)
@@ -309,6 +783,7 @@ async def chat_with_knowledge_stream(question: str, analyze_problem: bool = Fals
             "mode": result.get("mode"),
             "intent": result.get("intent"),
             "knowledge": result.get("knowledge"),
+            "runtime_topology": result.get("runtime_topology"),
             "rag_context": result.get("rag_context"),
         }
         yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
@@ -331,7 +806,9 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
     from app.agents import IntentParseAgent, KnowledgeExpertAgent
 
     if not analyze_problem:
-        answer, rag_context = await _general_chat(question)
+        runtime_topology = await _maybe_get_runtime_topology_from_question(question)
+        runtime_topology_payload = runtime_topology.model_dump() if runtime_topology else None
+        answer, rag_context = await _general_chat(question, runtime_topology_payload)
         return {
             "question": question,
             "mode": "general_chat",
@@ -345,6 +822,7 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
                 "clarification_needed": False,
             },
             "knowledge": None,
+            "runtime_topology": runtime_topology_payload,
             "rag_context": rag_context,
             "answer": answer,
         }
@@ -363,6 +841,7 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
                 "clarification_needed": False,
             },
             "knowledge": None,
+            "runtime_topology": None,
             "rag_context": "",
             "answer": _build_simple_chat_response(question),
         }
@@ -386,6 +865,7 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
                 "clarification_needed": False,
             },
             "knowledge": None,
+            "runtime_topology": None,
             "rag_context": "",
             "answer": "我暂时无法完成深度检索，但可以先陪你做简单交流。若你要排查问题，请补充服务名、异常现象或日志关键词。",
         }
@@ -400,19 +880,37 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
             "mode": "general_chat",
             "intent": intent.model_dump(),
             "knowledge": None,
+            "runtime_topology": None,
             "rag_context": "",
             "answer": answer,
         }
 
+    runtime_topology = None
+    runtime_config = runtime_graph_config_manager.get_effective_config()
+    if service and service != "unknown":
+        try:
+            runtime_topology = await runtime_topology_service.get_snapshot(
+                service,
+                runtime_config["traceDefaultLookbackMinutes"],
+            )
+        except Exception:
+            runtime_topology = None
+
     knowledge = await knowledge_agent.query(service, symptom)
     rag_answer = await _query_rag_for_context(question)
-    answer = _compose_qa_answer(knowledge.knowledge_report, rag_answer, intent.intent)
+    answer = _compose_qa_answer(
+        knowledge.knowledge_report,
+        rag_answer,
+        intent.intent,
+        runtime_topology=runtime_topology.model_dump() if runtime_topology else None,
+    )
 
     return {
         "question": question,
         "mode": "analysis",
         "intent": intent.model_dump(),
         "knowledge": knowledge.model_dump(),
+        "runtime_topology": runtime_topology.model_dump() if runtime_topology else None,
         "rag_context": rag_answer,
         "answer": answer,
     }
@@ -433,12 +931,12 @@ async def _query_rag_for_context(question: str) -> str:
     return ""
 
 
-async def _general_chat(question: str) -> tuple[str, str]:
+async def _general_chat(question: str, runtime_topology: Optional[Dict[str, Any]] = None) -> tuple[str, str]:
     if _is_simple_chat_text(question):
         return _build_simple_chat_response(question), ""
 
     rag_context = await _query_rag_for_context(question)
-    prompt = _build_general_chat_prompt(question, rag_context)
+    prompt = _build_general_chat_prompt(question, rag_context, runtime_topology)
 
     try:
         client, llm_config = llm_config_manager.get_client_for_scene("general_chat")
@@ -459,14 +957,19 @@ async def _general_chat(question: str) -> tuple[str, str]:
     return _build_simple_chat_response(question), ""
 
 
-def _build_general_chat_prompt(question: str, rag_context: str) -> str:
+def _build_general_chat_prompt(question: str, rag_context: str, runtime_topology: Optional[Dict[str, Any]] = None) -> str:
     context_block = f"\n参考知识：{rag_context}\n" if rag_context else "\n当前没有检索到额外知识上下文。\n"
+    runtime_block = (
+        f"\n最近运行时拓扑：{json.dumps(runtime_topology, ensure_ascii=False, indent=2)}\n"
+        if runtime_topology else
+        "\n当前没有匹配到明确的运行时拓扑信息。\n"
+    )
     return (
         "你是 AIOps 平台里的通用问答助手。"
         "请优先用自然、简洁、友好的方式回答。"
         "如果用户问题明显是运维分析类，但当前不是分析模式，也要先正常回答，"
         "并在合适时提醒用户可以打开“分析问题”开关获取更深入的定位建议。"
-        f"{context_block}\n"
+        f"{context_block}{runtime_block}\n"
         f"用户问题：{question}"
     )
 
@@ -519,25 +1022,63 @@ def _build_simple_chat_response(question: str) -> str:
     return "我已收到你的消息。若你想让我更准确回答，请尽量提供服务名、异常现象或具体问题。"
 
 
-def _compose_qa_answer(knowledge_report: str, rag_context: str, intent_name: str) -> str:
+async def _maybe_get_runtime_topology_from_question(question: str):
+    runtime_config = runtime_graph_config_manager.get_effective_config()
+    if not runtime_config["runtimeGraphEnabled"]:
+        return None
+    lowered = question.lower()
+    candidate_services = [service for service in runtime_config["serviceList"] if service.lower() in lowered]
+    if not candidate_services:
+        return None
+    try:
+        return await runtime_topology_service.get_snapshot(
+            candidate_services[0],
+            runtime_config["traceDefaultLookbackMinutes"],
+        )
+    except Exception:
+        return None
+
+
+def _format_runtime_topology(runtime_topology: Dict[str, Any]) -> str:
+    downstream = runtime_topology.get("downstream", [])[:3]
+    anomalies = runtime_topology.get("anomalies", [])[:3]
+    parts = []
+    if downstream:
+        deps = [f"{item['target_service']}({item['avg_latency_ms']:.0f}ms)" for item in downstream if item.get("target_service")]
+        if deps:
+            parts.append(f"最近调用依赖：{', '.join(deps)}")
+    if anomalies:
+        spans = [f"{item['span_name']}({item['duration_ms']:.0f}ms)" for item in anomalies if item.get("span_name")]
+        if spans:
+            parts.append(f"异常 Span：{', '.join(spans)}")
+    return "\n运行时观测： " + "；".join(parts) if parts else ""
+
+
+def _compose_qa_answer(
+    knowledge_report: str,
+    rag_context: str,
+    intent_name: str,
+    runtime_topology: Optional[Dict[str, Any]] = None,
+) -> str:
     report = (knowledge_report or "").strip()
     rag = (rag_context or "").strip()
+    runtime_suffix = _format_runtime_topology(runtime_topology) if runtime_topology else ""
 
     if report and rag:
         if rag in report:
-            return report
-        return f"{report}\n\n补充参考：{rag}"
+            return f"{report}{runtime_suffix}"
+        return f"{report}\n\n补充参考：{rag}{runtime_suffix}"
 
     if report:
-        return report
+        return f"{report}{runtime_suffix}"
 
     if rag:
-        return rag
+        return f"{rag}{runtime_suffix}"
 
     if intent_name == "GENERAL_QA":
-        return "我暂时没有检索到直接答案。你可以补充服务名、故障现象、日志关键词或依赖组件，我再帮你分析。"
+        return f"我暂时没有检索到直接答案。你可以补充服务名、故障现象、日志关键词或依赖组件，我再帮你分析。{runtime_suffix}"
 
-    return "未找到相关知识，请补充更多上下文后重试。"
+    return f"未找到相关知识，请补充更多上下文后重试。{runtime_suffix}"
 
 def _get_mock_kg_data(service: str) -> dict:
     return {

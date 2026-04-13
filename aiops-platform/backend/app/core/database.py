@@ -130,6 +130,22 @@ class AuditLog(Base):
     detail_json = Column(Text, default="{}")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class RuntimeGraphConfig(Base):
+    __tablename__ = "runtime_graph_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trace_backend = Column(String(50), default="jaeger", nullable=False)
+    jaeger_query_url = Column(String(255), default="http://localhost:16686", nullable=False)
+    tempo_query_url = Column(String(255), default="", nullable=False)
+    trace_query_timeout = Column(Integer, default=15, nullable=False)
+    trace_default_lookback_minutes = Column(Integer, default=15, nullable=False)
+    runtime_graph_enabled = Column(Boolean, default=True, nullable=False)
+    cmdb_service_list_json = Column(Text, default="[]", nullable=False)
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 

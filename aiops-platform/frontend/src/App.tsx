@@ -6,7 +6,6 @@ import {
   FileTextOutlined,
   BugOutlined,
   ApiOutlined,
-  CodeOutlined,
   UserOutlined,
   LogoutOutlined,
   SettingOutlined,
@@ -16,11 +15,9 @@ import Dashboard from './pages/Dashboard';
 import LogList from './pages/LogList';
 import Diagnose from './pages/Diagnose';
 import KnowledgeGraph from './pages/KnowledgeGraph';
-import Terminal from './pages/Terminal';
 import ModelHub from './pages/ModelHub';
 import Login from './pages/Login';
 import Register from './pages/Register';
-import { TerminalProvider } from './contexts/TerminalContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import PrivateRoute from './components/PrivateRoute';
 import AssistantWidget from './components/AssistantWidget';
@@ -31,9 +28,8 @@ const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '仪表盘', path: '/', permission: null },
   { key: '/logs', icon: <FileTextOutlined />, label: '日志列表', path: '/logs', permission: 'logs:view' },
   { key: '/diagnose', icon: <BugOutlined />, label: '故障诊断', path: '/diagnose', permission: 'diagnose:view' },
-  { key: '/knowledge', icon: <ApiOutlined />, label: '知识库', path: '/knowledge', permission: 'knowledge:view' },
+  { key: '/knowledge', icon: <ApiOutlined />, label: '知识图谱', path: '/knowledge', permission: 'knowledge:view' },
   { key: '/models', icon: <SettingOutlined />, label: '模型管理', path: '/models', permission: null, adminOnly: true },
-  { key: '/terminal', icon: <CodeOutlined />, label: 'Web终端', path: '/terminal', permission: 'terminal:access', adminOnly: true },
 ];
 
 const AppContent = () => {
@@ -41,7 +37,6 @@ const AppContent = () => {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const { user, loading, logout, isAdmin, hasPermission } = useAuth();
-  const isTerminalPage = location.pathname === '/terminal';
   const isLoginPage = location.pathname === '/login';
   const isRegisterPage = location.pathname === '/register';
 
@@ -133,53 +128,33 @@ const AppContent = () => {
             </Dropdown>
           </div>
         </Header>
-        <Content style={{ margin: '16px', position: 'relative' }}>
-          {/* Terminal 始终保持在 DOM 中，只是隐藏显示 */}
-          <div style={{ 
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: '#fff', 
-            borderRadius: 8, 
-            overflow: 'hidden',
-            display: isTerminalPage ? 'block' : 'none',
-          }}>
-            <PrivateRoute requireAdmin>
-              <Terminal />
-            </PrivateRoute>
+        <Content style={{ margin: '16px' }}>
+          <div style={{ padding: 24, background: '#fff', borderRadius: 8, minHeight: 'calc(100vh - 112px)' }}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/logs" element={
+                <PrivateRoute requiredPermission="logs:view">
+                  <LogList />
+                </PrivateRoute>
+              } />
+              <Route path="/diagnose" element={
+                <PrivateRoute requiredPermission="diagnose:view">
+                  <Diagnose />
+                </PrivateRoute>
+              } />
+              <Route path="/knowledge" element={
+                <PrivateRoute requiredPermission="knowledge:view">
+                  <KnowledgeGraph />
+                </PrivateRoute>
+              } />
+              <Route path="/qa" element={<Navigate to="/" replace />} />
+              <Route path="/models" element={
+                <PrivateRoute requireAdmin>
+                  <ModelHub />
+                </PrivateRoute>
+              } />
+            </Routes>
           </div>
-          
-          {/* 其他页面内容 */}
-          {!isTerminalPage && (
-            <div style={{ padding: 24, background: '#fff', borderRadius: 8, minHeight: 'calc(100vh - 112px)' }}>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/logs" element={
-                  <PrivateRoute requiredPermission="logs:view">
-                    <LogList />
-                  </PrivateRoute>
-                } />
-                <Route path="/diagnose" element={
-                  <PrivateRoute requiredPermission="diagnose:view">
-                    <Diagnose />
-                  </PrivateRoute>
-                } />
-                <Route path="/knowledge" element={
-                  <PrivateRoute requiredPermission="knowledge:view">
-                    <KnowledgeGraph />
-                  </PrivateRoute>
-                } />
-                <Route path="/qa" element={<Navigate to="/" replace />} />
-                <Route path="/models" element={
-                  <PrivateRoute requireAdmin>
-                    <ModelHub />
-                  </PrivateRoute>
-                } />
-              </Routes>
-            </div>
-          )}
         </Content>
         {(isAdmin || hasPermission('qa:view')) && <AssistantWidget />}
       </Layout>
@@ -191,13 +166,11 @@ const App = () => {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <TerminalProvider>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
-            <Route path="/*" element={<AppContent />} />
-          </Routes>
-        </TerminalProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/*" element={<AppContent />} />
+        </Routes>
       </AuthProvider>
     </BrowserRouter>
   );

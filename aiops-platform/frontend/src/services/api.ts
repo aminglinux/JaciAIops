@@ -19,6 +19,12 @@ import type {
   ProviderFormValues,
   DiscoveredModel,
   LLMRuntimeConfig,
+  RuntimeAnomalyResponse,
+  RuntimeDependencyResponse,
+  RuntimeGraphConfig,
+  RuntimeGraphConfigPayload,
+  RuntimeTopologySnapshot,
+  ManualGraphEntryPayload,
 } from '../types';
 
 const api = axios.create({
@@ -146,6 +152,52 @@ export const knowledgeApi = {
     const response = await api.get('/knowledge/topology', { params: { service, depth } });
     return response.data;
   },
+
+  getRuntimeGraphConfig: async (): Promise<RuntimeGraphConfig> => {
+    const response = await api.get<ApiResponse<RuntimeGraphConfig>>('/knowledge/runtime-config');
+    return response.data.data;
+  },
+
+  updateRuntimeGraphConfig: async (payload: RuntimeGraphConfigPayload): Promise<RuntimeGraphConfig> => {
+    const response = await api.put<ApiResponse<RuntimeGraphConfig>>('/knowledge/runtime-config', payload);
+    return response.data.data;
+  },
+
+  createManualEntry: async (payload: ManualGraphEntryPayload): Promise<{ source: string; sourceType: string; relationCreated: boolean }> => {
+    const response = await api.post<ApiResponse<{ source: string; sourceType: string; relationCreated: boolean }>>('/knowledge/manual-entry', payload);
+    return response.data.data;
+  },
+
+  updateGraphNode: async (nodeId: string, payload: { name: string; properties: Record<string, unknown> }): Promise<unknown> => {
+    const response = await api.put(`/knowledge/nodes/${nodeId}`, payload);
+    return response.data;
+  },
+
+  deleteGraphNode: async (nodeId: string): Promise<unknown> => {
+    const response = await api.delete(`/knowledge/nodes/${nodeId}`);
+    return response.data;
+  },
+
+  updateGraphRelation: async (relationId: string, payload: { relation_type: string; properties: Record<string, unknown> }): Promise<unknown> => {
+    const response = await api.put(`/knowledge/relations/${relationId}`, payload);
+    return response.data;
+  },
+
+  deleteGraphRelation: async (relationId: string): Promise<unknown> => {
+    const response = await api.delete(`/knowledge/relations/${relationId}`);
+    return response.data;
+  },
+
+  importGraphData: async (file: File): Promise<{ fileName: string; records: number; nodes: number; relations: number; failed?: number; errors?: Array<{ index: number; error: string }> }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post<ApiResponse<{ fileName: string; records: number; nodes: number; relations: number; failed?: number; errors?: Array<{ index: number; error: string }> }>>(
+      '/knowledge/import-data',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    );
+    return response.data.data;
+  },
 };
 
 export const llmApi = {
@@ -217,6 +269,29 @@ export const llmApi = {
     return response.data.data;
   },
 
+};
+
+export const observabilityRuntimeApi = {
+  getDependencies: async (service: string, minutes: number = 15): Promise<RuntimeDependencyResponse> => {
+    const response = await api.get<RuntimeDependencyResponse>('/observability-runtime/dependencies', {
+      params: { service, minutes },
+    });
+    return response.data;
+  },
+
+  getAnomalies: async (service: string, minutes: number = 15): Promise<RuntimeAnomalyResponse> => {
+    const response = await api.get<RuntimeAnomalyResponse>('/observability-runtime/anomalies', {
+      params: { service, minutes },
+    });
+    return response.data;
+  },
+
+  getTopology: async (service: string, minutes: number = 15): Promise<RuntimeTopologySnapshot> => {
+    const response = await api.get<RuntimeTopologySnapshot>('/observability-runtime/topology', {
+      params: { service, minutes },
+    });
+    return response.data;
+  },
 };
 
 export const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/logs/ws/simulate`;
