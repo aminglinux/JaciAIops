@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
 from neo4j import GraphDatabase
+import re
 
 from app.core.config import settings
 
@@ -299,20 +300,29 @@ async def chat_with_knowledge(question: str):
     knowledge_agent = KnowledgeExpertAgent()
     
     intent = await intent_agent.parse(question)
-    
-    service = intent.get("entities", {}).get("service", "unknown")
-    symptom = intent.get("entities", {}).get("symptom", "unknown")
-    
+    service = intent.entities.get("service", "unknown")
+    symptom = intent.entities.get("symptom", "unknown")
+
+    if _is_simple_chat(question, intent):
+        answer = _build_simple_chat_response(question)
+        return {
+            "question": question,
+            "intent": intent.model_dump(),
+            "knowledge": None,
+            "rag_context": "",
+            "answer": answer,
+        }
+
     knowledge = await knowledge_agent.query(service, symptom)
-    
     rag_answer = await _query_rag_for_context(question)
-    
+    answer = _compose_qa_answer(knowledge.knowledge_report, rag_answer, intent.intent)
+
     return {
         "question": question,
-        "intent": intent,
-        "knowledge": knowledge,
+        "intent": intent.model_dump(),
+        "knowledge": knowledge.model_dump(),
         "rag_context": rag_answer,
-        "answer": knowledge.get("knowledge_report", "未找到相关知识")
+        "answer": answer,
     }
 
 async def _query_rag_for_context(question: str) -> str:
@@ -329,6 +339,69 @@ async def _query_rag_for_context(question: str) -> str:
     except:
         pass
     return ""
+
+
+def _is_simple_chat(question: str, intent) -> bool:
+    normalized = question.strip().lower()
+    if not normalized:
+        return True
+
+    greeting_patterns = [
+        r"^(hi|hello|hey)\b",
+        r"^(你好|您好|嗨|哈喽)",
+        r"(你是谁|你能做什么|帮助|help)$",
+        r"^(早上好|中午好|下午好|晚上好)$",
+    ]
+    if any(re.search(pattern, normalized) for pattern in greeting_patterns):
+        return True
+
+    has_entities = bool(intent.entities)
+    if intent.intent == "GENERAL_QA" and not has_entities and len(normalized) <= 30:
+        return True
+
+    return False
+
+
+def _build_simple_chat_response(question: str) -> str:
+    normalized = question.strip().lower()
+    if any(token in normalized for token in ["你是谁", "你能做什么", "help", "帮助"]):
+        return (
+            "你好，我是 AIOps 智能问答助手。"
+            "我更擅长回答运维相关问题，比如服务依赖、故障排查、数据库连接、日志分析和常见 SOP。"
+            "你可以直接问我：`order-service 依赖哪些组件？` 或 `数据库连接池耗尽怎么排查？`"
+        )
+
+    if any(token in normalized for token in ["你好", "您好", "hi", "hello", "hey", "嗨", "哈喽"]):
+        return (
+            "你好，很高兴为你服务。"
+            "你可以直接描述一个运维问题、服务名或故障现象，我会尽量给出排查建议。"
+        )
+
+    if any(token in normalized for token in ["早上好", "中午好", "下午好", "晚上好"]):
+        return "你好，已在线。你可以告诉我具体的运维问题，我来帮你分析。"
+
+    return "我已收到你的消息。若你想让我更准确回答，请尽量提供服务名、异常现象或具体问题。"
+
+
+def _compose_qa_answer(knowledge_report: str, rag_context: str, intent_name: str) -> str:
+    report = (knowledge_report or "").strip()
+    rag = (rag_context or "").strip()
+
+    if report and rag:
+        if rag in report:
+            return report
+        return f"{report}\n\n补充参考：{rag}"
+
+    if report:
+        return report
+
+    if rag:
+        return rag
+
+    if intent_name == "GENERAL_QA":
+        return "我暂时没有检索到直接答案。你可以补充服务名、故障现象、日志关键词或依赖组件，我再帮你分析。"
+
+    return "未找到相关知识，请补充更多上下文后重试。"
 
 def _get_mock_kg_data(service: str) -> dict:
     return {
