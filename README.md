@@ -66,49 +66,53 @@ AIops/
 
 ### 环境要求
 
-- Python 3.9+
-- Node.js 18+
-- Neo4j 4.4+（可选）
-- Docker & Kubernetes（可选）
+- Docker Engine 24+ 与 Docker Compose
+- Neo4j 4.4+/5.x（可选）
+- RAG 服务（可选）
 
-### 安装依赖
+### 使用 Docker Compose 部署前后端
 
 ```bash
-# 后端依赖
+# 在仓库根目录执行
+docker compose up --build -d
+docker compose logs -f
+```
+
+默认访问地址：
+
+- 前端：http://localhost:3000
+- 后端 API：http://localhost:8000
+- 后端 Swagger：http://localhost:8000/docs
+
+### 可选环境变量
+
+如需启用真实外部依赖，请先在宿主机导出环境变量再启动：
+
+```bash
+export OPENAI_API_KEY=your_api_key
+export NEO4J_URI=bolt://localhost:7687
+export NEO4J_USER=neo4j
+export NEO4J_PASSWORD=your_password
+export RAG_SERVICE_URL=http://localhost:8001
+```
+
+未设置时，系统仍可启动，但知识图谱、RAG 和部分智能诊断能力会降级。
+
+### 本地源码开发
+
+```bash
+# 后端
 cd aiops-platform/backend
 pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-# 前端依赖
+# 前端（新终端）
 cd aiops-platform/frontend
 npm install
-```
-
-### 配置环境变量
-
-```bash
-# 复制环境变量模板
-cp .env.example .env
-
-# 编辑 .env 文件，填入您的配置
-# - OpenAI API Key
-# - Neo4j 连接信息
-# - 阿里云 Access Key（用于 SLB 诊断）
-# - SMTP 配置（用于邮件通知）
-```
-
-### 启动服务
-
-```bash
-# 启动后端
-cd aiops-platform/backend
-python app/main.py
-
-# 启动前端（新终端）
-cd aiops-platform/frontend
 npm run dev
 ```
 
-访问 http://localhost:3000 使用 Web 界面。
+前端开发模式默认访问 `http://localhost:3000`，并通过 Vite 代理 `/api` 到本地后端。
 
 ## 📚 详细文档
 

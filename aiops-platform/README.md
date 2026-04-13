@@ -477,49 +477,64 @@ prophet==1.1.5
 ## 🚀 安装部署
 
 ### 1. 环境要求
-- Python 3.8+
-- Node.js 16+
+- Docker Engine 24+ 与 Docker Compose
 - Neo4j 5.x (可选，用于知识图谱)
 - RAG 服务 (可选，用于知识库检索)
 
-### 2. 后端部署
+### 2. 推荐方式：Docker Compose 部署前后端
 
 ```bash
-cd aiops-platform/backend
+# 在仓库根目录执行
+docker compose up --build -d
 
-# 安装依赖
-pip install -r requirements.txt
-
-# 复制环境变量模板
-cp .env.example .env
-
-# 编辑 .env 文件，配置必要的参数
-# 详细配置见下方"配置说明"部分
-
-# 创建数据目录
-mkdir -p data/approvals
-
-# 启动服务
-uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+# 查看启动日志
+docker compose logs -f
 ```
 
-### 3. 前端部署
+默认端口：
+
+- 前端：`http://localhost:3000`
+- 后端 API：`http://localhost:8000`
+- Swagger：`http://localhost:8000/docs`
+
+Compose 文件使用 `build` 模式构建两个镜像：
+
+- `backend`：基于 `aiops-platform/backend/Dockerfile`
+- `frontend`：基于 `aiops-platform/frontend/Dockerfile`
+
+如需启用外部依赖，请在执行前导出宿主机环境变量：
 
 ```bash
+export OPENAI_API_KEY=your_api_key
+export NEO4J_URI=bolt://localhost:7687
+export NEO4J_USER=neo4j
+export NEO4J_PASSWORD=your_password
+export RAG_SERVICE_URL=http://localhost:8001
+```
+
+未设置这些变量时，系统可以启动，但知识图谱、RAG 与部分 LLM 能力会退化为降级模式。
+
+### 3. 本地源码开发
+
+```bash
+# 后端
+cd aiops-platform/backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# 前端（新终端）
 cd aiops-platform/frontend
-
-# 安装依赖
 npm install
-
-# 启动开发服务器
 npm run dev
 ```
+
+前端开发服务器会将 `/api` 代理到 `http://localhost:8000`。
 
 ### 4. Neo4j 部署 (可选)
 
 ```bash
-# 使用 Docker 启动 Neo4j
-docker run \
+docker run -d \
+  --name aiops-neo4j \
   -p 7474:7474 -p 7687:7687 \
   -e NEO4J_AUTH=neo4j/password \
   neo4j:5.14.1
