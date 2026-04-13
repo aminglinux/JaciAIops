@@ -10,6 +10,7 @@ import {
   CodeOutlined,
   UserOutlined,
   LogoutOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
 
 import Dashboard from './pages/Dashboard';
@@ -18,6 +19,7 @@ import Diagnose from './pages/Diagnose';
 import QA from './pages/QA';
 import KnowledgeGraph from './pages/KnowledgeGraph';
 import Terminal from './pages/Terminal';
+import ModelHub from './pages/ModelHub';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import { TerminalProvider } from './contexts/TerminalContext';
@@ -32,6 +34,7 @@ const menuItems = [
   { key: '/diagnose', icon: <BugOutlined />, label: '故障诊断', path: '/diagnose', permission: 'diagnose:view' },
   { key: '/knowledge', icon: <ApiOutlined />, label: '知识库', path: '/knowledge', permission: 'knowledge:view' },
   { key: '/qa', icon: <QuestionCircleOutlined />, label: '智能问答', path: '/qa', permission: 'qa:view' },
+  { key: '/models', icon: <SettingOutlined />, label: '模型管理', path: '/models', permission: null, adminOnly: true },
   { key: '/terminal', icon: <CodeOutlined />, label: 'Web终端', path: '/terminal', permission: 'terminal:access', adminOnly: true },
 ];
 
@@ -173,6 +176,11 @@ const AppContent = () => {
                 <Route path="/qa" element={
                   <PrivateRoute requiredPermission="qa:view">
                     <QA />
+                  </PrivateRoute>
+                } />
+                <Route path="/models" element={
+                  <PrivateRoute requireAdmin>
+                    <ModelHub />
                   </PrivateRoute>
                 } />
               </Routes>

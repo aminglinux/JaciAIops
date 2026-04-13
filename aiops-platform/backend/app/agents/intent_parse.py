@@ -1,8 +1,8 @@
 import json
 import re
 from typing import Optional, List, Dict, Any
-from openai import OpenAI
 from app.core.config import settings
+from app.services import llm_config_manager
 from .schemas import IntentResult, EntitiesResult, NEREntity
 from ..utils.llm_cache import llm_cache
 
@@ -14,10 +14,6 @@ class IntentParseAgent:
     """
     
     def __init__(self):
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
         self.cmdb_service_list = settings.CMDB_SERVICE_LIST
         
     def _build_ner_prompt(self, user_input: str) -> str:
@@ -87,17 +83,19 @@ Output Format (纯 JSON):
 }}"""
 
     async def parse(self, user_input: str) -> IntentResult:
+        client, llm_config = llm_config_manager.get_client_for_scene("intent_parse")
+        temperature = llm_config.temperature if llm_config.temperature is not None else 0.1
         ner_prompt = self._build_ner_prompt(user_input)
         
         cache_key_messages = json.dumps([{"role": "user", "content": ner_prompt}], ensure_ascii=False)
-        cached = llm_cache.get(settings.OPENAI_MODEL, cache_key_messages, 0.1)
+        cached = llm_cache.get(llm_config.model, cache_key_messages, temperature)
         if cached is not None:
             ner_result = cached
         else:
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            response = client.chat.completions.create(
+                model=llm_config.model,
                 messages=[{"role": "user", "content": ner_prompt}],
-                temperature=0.1
+                temperature=temperature
             )
             content = response.choices[0].message.content.strip()
             content = re.sub(r'^```json\s*', '', content)
@@ -111,20 +109,20 @@ Output Format (纯 JSON):
                     "intent": "GENERAL_QA",
                     "confidence": "LOW"
                 }
-            llm_cache.set(settings.OPENAI_MODEL, cache_key_messages, 0.1, ner_result)
+            llm_cache.set(llm_config.model, cache_key_messages, temperature, ner_result)
         
         entities = ner_result.get("entities", [])
         intent_prompt = self._build_intent_prompt(user_input, entities)
         
         cache_key_messages2 = json.dumps([{"role": "user", "content": intent_prompt}], ensure_ascii=False)
-        cached2 = llm_cache.get(settings.OPENAI_MODEL, cache_key_messages2, 0.1)
+        cached2 = llm_cache.get(llm_config.model, cache_key_messages2, temperature)
         if cached2 is not None:
             intent_result = cached2
         else:
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            response = client.chat.completions.create(
+                model=llm_config.model,
                 messages=[{"role": "user", "content": intent_prompt}],
-                temperature=0.1
+                temperature=temperature
             )
             content = response.choices[0].message.content.strip()
             content = re.sub(r'^```json\s*', '', content)
@@ -140,7 +138,7 @@ Output Format (纯 JSON):
                     "clarification_needed": True,
                     "raw_response": content
                 }
-            llm_cache.set(settings.OPENAI_MODEL, cache_key_messages2, 0.1, intent_result)
+            llm_cache.set(llm_config.model, cache_key_messages2, temperature, intent_result)
         
         return IntentResult(
             intent=intent_result.get("intent", "GENERAL_QA"),

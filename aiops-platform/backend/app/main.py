@@ -10,6 +10,7 @@ from app.api.terminal import websocket_terminal
 from app.api.auth import router as auth_router, create_default_users
 from app.api.approval import router as approval_router
 from app.agents.knowledge import KnowledgeExpertAgent
+from app.services import llm_config_manager
 from app.utils.logger import setup_logger
 
 _knowledge_agent_instance: KnowledgeExpertAgent = None
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
     setup_logger("aiops", level=logging.DEBUG if settings.DEBUG else logging.INFO)
     init_db()
     create_default_users()
+    llm_config_manager.bootstrap_defaults()
     validate_security_settings()
     _knowledge_agent_instance = KnowledgeExpertAgent()
     yield

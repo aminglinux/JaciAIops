@@ -1,6 +1,24 @@
 import axios from 'axios';
 import { message } from 'antd';
-import type { Log, LogStats, AgentTask, DiagnoseRequest, DiagnoseResponse, ApiResponse, LoginParams, LoginResult, UserInfo, RegisterParams } from '../types';
+import type {
+  Log,
+  LogStats,
+  AgentTask,
+  DiagnoseRequest,
+  DiagnoseResponse,
+  ApiResponse,
+  LoginParams,
+  LoginResult,
+  UserInfo,
+  RegisterParams,
+  LLMProvider,
+  LLMModel,
+  LLMBinding,
+  BindingFormValues,
+  ModelFormValues,
+  ProviderFormValues,
+  DiscoveredModel,
+} from '../types';
 
 const api = axios.create({
   baseURL: '/api',
@@ -126,6 +144,76 @@ export const knowledgeApi = {
   getTopology: async (service?: string, depth: number = 2): Promise<unknown> => {
     const response = await api.get('/knowledge/topology', { params: { service, depth } });
     return response.data;
+  },
+};
+
+export const llmApi = {
+  getProviders: async (): Promise<LLMProvider[]> => {
+    const response = await api.get<ApiResponse<LLMProvider[]>>('/llm/providers');
+    return response.data.data;
+  },
+
+  createProvider: async (data: ProviderFormValues): Promise<LLMProvider> => {
+    const response = await api.post<ApiResponse<LLMProvider>>('/llm/providers', data);
+    return response.data.data;
+  },
+
+  updateProvider: async (id: number, data: Partial<ProviderFormValues>): Promise<LLMProvider> => {
+    const response = await api.put<ApiResponse<LLMProvider>>(`/llm/providers/${id}`, data);
+    return response.data.data;
+  },
+
+  deleteProvider: async (id: number): Promise<void> => {
+    await api.delete(`/llm/providers/${id}`);
+  },
+
+  validateProvider: async (id: number): Promise<{ success: boolean; message: string; detectedCapabilities: Record<string, unknown> }> => {
+    const response = await api.post<ApiResponse<{ success: boolean; message: string; detectedCapabilities: Record<string, unknown> }>>(`/llm/providers/${id}/validate`);
+    return response.data.data;
+  },
+
+  discoverModels: async (id: number): Promise<{ providerId: number; providerName: string; models: DiscoveredModel[] }> => {
+    const response = await api.post<ApiResponse<{ providerId: number; providerName: string; models: DiscoveredModel[] }>>(`/llm/providers/${id}/discover-models`);
+    return response.data.data;
+  },
+
+  syncModels: async (id: number, data: { model_ids?: string[]; overwrite_existing?: boolean }): Promise<{ providerId: number; providerName: string; created: number; updated: number; skipped: number; totalSelected: number }> => {
+    const response = await api.post<ApiResponse<{ providerId: number; providerName: string; created: number; updated: number; skipped: number; totalSelected: number }>>(`/llm/providers/${id}/sync-models`, data);
+    return response.data.data;
+  },
+
+  getModels: async (): Promise<LLMModel[]> => {
+    const response = await api.get<ApiResponse<LLMModel[]>>('/llm/models');
+    return response.data.data;
+  },
+
+  createModel: async (data: ModelFormValues): Promise<LLMModel> => {
+    const response = await api.post<ApiResponse<LLMModel>>('/llm/models', data);
+    return response.data.data;
+  },
+
+  updateModel: async (id: number, data: Partial<ModelFormValues>): Promise<LLMModel> => {
+    const response = await api.put<ApiResponse<LLMModel>>(`/llm/models/${id}`, data);
+    return response.data.data;
+  },
+
+  deleteModel: async (id: number): Promise<void> => {
+    await api.delete(`/llm/models/${id}`);
+  },
+
+  getBindings: async (): Promise<{ scenes: unknown[]; bindings: LLMBinding[] }> => {
+    const response = await api.get<ApiResponse<{ scenes: unknown[]; bindings: LLMBinding[] }>>('/llm/bindings');
+    return response.data.data;
+  },
+
+  updateBinding: async (sceneKey: string, data: BindingFormValues): Promise<LLMBinding> => {
+    const response = await api.put<ApiResponse<LLMBinding>>(`/llm/bindings/${sceneKey}`, data);
+    return response.data.data;
+  },
+
+  syncEnv: async (): Promise<{ success: boolean; envPath: string; syncedKeys: string[] }> => {
+    const response = await api.post<ApiResponse<{ success: boolean; envPath: string; syncedKeys: string[] }>>('/llm/sync-env');
+    return response.data.data;
   },
 };
 

@@ -4,8 +4,8 @@ import os
 from typing import Dict, Any, Optional
 import httpx
 from neo4j import GraphDatabase
-from openai import OpenAI
 from app.core.config import settings
+from app.services import llm_config_manager
 from .schemas import KnowledgeResult, TopologyInfo
 from ..utils.logger import get_logger
 
@@ -19,10 +19,6 @@ class KnowledgeExpertAgent:
     """
     
     def __init__(self):
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
         self.neo4j_driver = None
         self.debug_skill_content = self._load_debug_skill()
     
@@ -108,10 +104,11 @@ Output Format
         prompt = self._build_prompt(service, symptom, topology_info, rag_context)
         
         try:
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            client, llm_config = llm_config_manager.get_client_for_scene("knowledge_analysis")
+            response = client.chat.completions.create(
+                model=llm_config.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=llm_config.temperature
             )
             content = response.choices[0].message.content.strip()
         except Exception as e:

@@ -21,6 +21,7 @@ services:
       - "8000:8000"
     volumes:
       - ./aiops-platform/backend/data:/app/data
+      - ./aiops-platform/backend/.env:/app/.env
       - ./knowledge_graph:/knowledge_graph:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

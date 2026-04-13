@@ -178,3 +178,100 @@ export interface DiagnoseResponse {
   status: string;
   message: string;
 }
+
+export interface LLMProvider {
+  id: number;
+  name: string;
+  providerCode: string;
+  providerType: string;
+  baseUrl: string;
+  apiKeyMasked: string;
+  enabled: boolean;
+  isBuiltin: boolean;
+  extraConfig?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface LLMModel {
+  id: number;
+  providerId: number;
+  providerName: string;
+  modelId: string;
+  displayName: string;
+  modelType: string;
+  supportsFunctionCalling: boolean;
+  supportsStreaming: boolean;
+  supportsJsonMode: boolean;
+  contextWindow?: number | null;
+  maxOutputTokens?: number | null;
+  enabled: boolean;
+  isDefaultCandidate: boolean;
+  meta?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface LLMBinding {
+  sceneKey: string;
+  displayName: string;
+  temperature?: number | null;
+  maxTokens?: number | null;
+  topP?: number | null;
+  enabled: boolean;
+  modelId?: number | null;
+  modelName: string;
+  providerId?: number | null;
+  providerName: string;
+  supportsFunctionCalling: boolean;
+  source: string;
+}
+
+export interface LLMScene {
+  scene_key: string;
+  display_name: string;
+  temperature: number;
+  supports_function_calling: boolean;
+}
+
+export interface ProviderFormValues {
+  name: string;
+  provider_code: string;
+  provider_type: string;
+  base_url: string;
+  api_key?: string;
+  enabled: boolean;
+}
+
+export interface ModelFormValues {
+  provider_id: number;
+  model_id: string;
+  display_name: string;
+  model_type: string;
+  supports_function_calling: boolean;
+  supports_streaming: boolean;
+  supports_json_mode: boolean;
+  context_window?: number;
+  max_output_tokens?: number;
+  enabled: boolean;
+  is_default_candidate: boolean;
+}
+
+export interface BindingFormValues {
+  model_id: number;
+  temperature?: number;
+  max_tokens?: number;
+  top_p?: number;
+  enabled: boolean;
+}
+
+export interface DiscoveredModel {
+  modelId: string;
+  displayName: string;
+  alreadyImported: boolean;
+  enabled: boolean;
+  supportsFunctionCalling: boolean;
+  supportsStreaming: boolean;
+  supportsJsonMode: boolean;
+  modelType: string;
+}

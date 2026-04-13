@@ -1,8 +1,7 @@
 import json
 import re
 from typing import Dict, Any, List
-from openai import OpenAI
-from app.core.config import settings
+from app.services import llm_config_manager
 
 class ActionExecuteAgent:
     """
@@ -14,10 +13,7 @@ class ActionExecuteAgent:
     HIGH_RISK_OPERATIONS = ["restart_database", "full_release", "traffic_switch", "restart_core_service"]
     
     def __init__(self):
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
+        pass
     
     def _build_prompt(self, action_plan: str, target_entities: Dict) -> str:
         return f"""你是一个严谨的运维执行者。你负责将修复方案转化为具体的阿里云 OOS (Ops Orchestration Service) 执行指令。
@@ -52,10 +48,11 @@ JSON:
     async def execute(self, action_plan: str, target_entities: Dict) -> dict:
         prompt = self._build_prompt(action_plan, target_entities)
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        client, llm_config = llm_config_manager.get_client_for_scene("action_execute")
+        response = client.chat.completions.create(
+            model=llm_config.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1
+            temperature=llm_config.temperature
         )
         
         content = response.choices[0].message.content.strip()

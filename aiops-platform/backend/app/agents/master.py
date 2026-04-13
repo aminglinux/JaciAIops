@@ -2,8 +2,8 @@ import json
 import re
 import os
 from typing import Dict, Any, List, Optional
-from openai import OpenAI
 from app.core.config import settings
+from app.services import llm_config_manager
 from .skill_manager import SkillManager
 from .tool_registry import ToolRegistry
 
@@ -21,10 +21,6 @@ class MasterAgent:
     """
     
     def __init__(self, tool_registry: ToolRegistry = None):
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
         self.skill_manager = SkillManager()
         self.tool_registry = tool_registry or ToolRegistry()
     
@@ -55,13 +51,14 @@ class MasterAgent:
         
         while iteration < max_iterations:
             iteration += 1
+            client, llm_config = llm_config_manager.get_client_for_scene("master_planner")
             
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            response = client.chat.completions.create(
+                model=llm_config.model,
                 messages=messages,
                 tools=self.tool_registry.get_tools_for_llm(),
                 tool_choice="auto",
-                temperature=0.2
+                temperature=llm_config.temperature
             )
             
             message = response.choices[0].message
@@ -417,10 +414,11 @@ reasoning: "根据 mysql_deadlock_skill，先获取死锁日志，再检查当�
 
 只返回 JSON，不要其他说明文字。"""
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        client, llm_config = llm_config_manager.get_client_for_scene("master_planner")
+        response = client.chat.completions.create(
+            model=llm_config.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=llm_config.temperature
         )
         
         content = response.choices[0].message.content.strip()
@@ -450,10 +448,11 @@ reasoning: "根据 mysql_deadlock_skill，先获取死锁日志，再检查当�
             user_query, intent_data, knowledge_context, observability_report
         )
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        client, llm_config = llm_config_manager.get_client_for_scene("master_planner")
+        response = client.chat.completions.create(
+            model=llm_config.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=llm_config.temperature
         )
         
         content = response.choices[0].message.content.strip()

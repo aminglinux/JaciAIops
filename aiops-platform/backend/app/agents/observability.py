@@ -3,8 +3,8 @@ import re
 import subprocess
 import os
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
 from app.core.config import settings
+from app.services import llm_config_manager
 from ..utils.logger import get_logger
 
 logger = get_logger("observability")
@@ -17,10 +17,6 @@ class ObservabilityAnalystAgent:
     """
     
     def __init__(self):
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL
-        )
         self.ansible_inventory_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "ansible", "inventory.ini"
@@ -262,13 +258,14 @@ Output Format (JSON):
     "root_cause_hypothesis": "根因假设",
     "recommendations": ["建议1", "建议2"],
     "confidence": "HIGH|MEDIUM|LOW"
-}}"""
+        }}"""
         
         try:
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
+            client, llm_config = llm_config_manager.get_client_for_scene("observability_summary")
+            response = client.chat.completions.create(
+                model=llm_config.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=llm_config.temperature
             )
             content = response.choices[0].message.content.strip()
             content = re.sub(r'^```json\s*', '', content)
@@ -341,10 +338,11 @@ Output Format
         
         prompt = self._build_prompt(service, metrics_data, logs_data, trace_data)
         
-        response = self.client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+        client, llm_config = llm_config_manager.get_client_for_scene("observability_summary")
+        response = client.chat.completions.create(
+            model=llm_config.model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
+            temperature=llm_config.temperature
         )
         
         content = response.choices[0].message.content.strip()
