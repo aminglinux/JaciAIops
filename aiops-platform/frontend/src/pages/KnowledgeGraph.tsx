@@ -536,12 +536,6 @@ const KnowledgeGraph = () => {
   }, [isAdmin]);
 
   useEffect(() => {
-    if (activeTab === 'kg' && !topologyLoaded) {
-      void loadExistingTopology();
-    }
-  }, [activeTab, topologyLoaded]);
-
-  useEffect(() => {
     if (runtimeChartRef.current && runtimeTopology) {
       if (!runtimeChartInstance.current) {
         runtimeChartInstance.current = echarts.init(runtimeChartRef.current);
@@ -772,10 +766,17 @@ const KnowledgeGraph = () => {
                 }}
                 loading={loading}
               >
-                刷新已有图谱
+                {topologyLoaded ? '刷新已有图谱' : '加载已有图谱'}
               </Button>
             }
           >
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="默认不自动加载全量图谱"
+              description="为降低 Neo4j CPU 压力，页面进入后不再自动查询全图。点击右上角按钮后，仅加载一份抽样拓扑；输入服务名查询时仍会加载对应服务的局部拓扑。"
+            />
             <Space.Compact style={{ width: '100%' }}>
               <Input
                 placeholder="输入服务名称 (如: prod-server-01) 或查询语句 (如: 查询所有服务器)"
@@ -814,6 +815,12 @@ const KnowledgeGraph = () => {
           </Card>
 
           {renderKGResult()}
+
+          {!topologyLoaded && !topologyData && (
+            <Card style={{ marginTop: 16 }}>
+              <Text type="secondary">尚未加载拓扑概览。点击右上角“加载已有图谱”，或直接输入服务名查询局部拓扑。</Text>
+            </Card>
+          )}
 
           {topologyData && topologyData.nodes.length > 0 && (
             <>

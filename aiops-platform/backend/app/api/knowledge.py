@@ -16,6 +16,9 @@ from app.services import llm_config_manager, runtime_graph_config_manager
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
+DEFAULT_TOPOLOGY_NODE_LIMIT = 40
+DEFAULT_TOPOLOGY_EDGE_LIMIT = 120
+
 class KGQueryRequest(BaseModel):
     query: str
     service: Optional[str] = None
@@ -364,21 +367,54 @@ async def get_topology(service: str = None, depth: int = 2):
                            elementId(endNode(r)) as target_id
                     LIMIT 200
                 """, name=service)
+                sampled_nodes = []
             else:
-                result = session.run("""
-                    MATCH (a)-[r]->(b)
-                    RETURN a,
-                           b,
-                           type(r) as rel_type,
-                           elementId(r) as rel_id,
-                           properties(r) as rel_props,
-                           elementId(startNode(r)) as source_id,
-                           elementId(endNode(r)) as target_id
-                    LIMIT 200
-                """)
+                sampled_node_records = session.run(
+                    """
+                    MATCH (n)
+                    RETURN n
+                    ORDER BY coalesce(n.name, '')
+                    LIMIT $node_limit
+                    """,
+                    node_limit=DEFAULT_TOPOLOGY_NODE_LIMIT,
+                )
+                sampled_nodes = [record.get("n") for record in sampled_node_records if record.get("n")]
+                sampled_node_ids = [node.element_id for node in sampled_nodes]
+
+                if sampled_node_ids:
+                    result = session.run(
+                        """
+                        UNWIND $node_ids AS node_id
+                        MATCH (a)
+                        WHERE elementId(a) = node_id
+                        MATCH (a)-[r]->(b)
+                        WHERE elementId(b) IN $node_ids
+                        RETURN a,
+                               b,
+                               type(r) as rel_type,
+                               elementId(r) as rel_id,
+                               properties(r) as rel_props,
+                               elementId(startNode(r)) as source_id,
+                               elementId(endNode(r)) as target_id
+                        LIMIT $edge_limit
+                        """,
+                        node_ids=sampled_node_ids,
+                        edge_limit=DEFAULT_TOPOLOGY_EDGE_LIMIT,
+                    )
+                else:
+                    result = []
             
             nodes = {}
             edges = []
+
+            for node in sampled_nodes:
+                node_id = node.element_id
+                nodes[node_id] = {
+                    "id": node_id,
+                    "label": dict(node).get("name", "unknown"),
+                    "type": list(node.labels)[0] if node.labels else "Node",
+                    "properties": dict(node),
+                }
             
             for record in result:
                 source = record.get("a")
@@ -418,7 +454,9 @@ async def get_topology(service: str = None, depth: int = 2):
         return {
             "nodes": list(nodes.values()),
             "edges": edges,
-            "source": "neo4j_kg"
+            "source": "neo4j_kg",
+            "mode": "service_scope" if service else "sampled_overview",
+            "message": None if service else "未指定服务时返回抽样拓扑，避免对 Neo4j 执行高开销全图扫描。",
         }
         
     except Exception as e:
