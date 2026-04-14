@@ -4,7 +4,6 @@ import {
   Button,
   Card,
   Divider,
-  FloatButton,
   Input,
   List,
   Space,
@@ -14,7 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CloseOutlined, QuestionCircleOutlined, SendOutlined } from '@ant-design/icons';
+import { CloseOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
 import type { LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
@@ -396,13 +395,46 @@ const AssistantWidget = () => {
   return (
     <>
       <style>{markdownMessageStyle}</style>
-      <FloatButton
-        icon={<QuestionCircleOutlined />}
-        type="primary"
-        tooltip="智能助手"
-        style={{ right: 24, bottom: 24 }}
-        onClick={() => setOpen(true)}
-      />
+      {!open && (
+        <div
+          style={{
+            position: 'fixed',
+            right: 24,
+            bottom: 24,
+            zIndex: 1100,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <Text
+            strong
+            style={{
+              padding: '4px 10px',
+              borderRadius: 999,
+              background: 'rgba(22, 119, 255, 0.12)',
+              color: '#1677ff',
+              boxShadow: '0 6px 18px rgba(22,119,255,0.12)',
+            }}
+          >
+            AIOps助手
+          </Text>
+          <Button
+            type="primary"
+            shape="circle"
+            size="large"
+            icon={<RobotOutlined style={{ fontSize: 24 }} />}
+            aria-label="打开AIOps助手"
+            onClick={() => setOpen(true)}
+            style={{
+              width: 60,
+              height: 60,
+              boxShadow: '0 12px 24px rgba(22,119,255,0.28)',
+            }}
+          />
+        </div>
+      )}
 
       {open && (
         <Card
@@ -415,7 +447,7 @@ const AssistantWidget = () => {
                 width: '100%',
               }}
             >
-              智能助手
+              AIOps助手
             </div>
           }
           extra={<Button type="text" icon={<CloseOutlined />} onClick={() => setOpen(false)} />}
