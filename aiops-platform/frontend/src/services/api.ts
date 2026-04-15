@@ -3,6 +3,8 @@ import { message } from 'antd';
 import type {
   Log,
   LogStats,
+  LogSourceConfig,
+  LogSourceConfigPayload,
   AgentTask,
   DiagnoseRequest,
   DiagnoseResponse,
@@ -25,6 +27,8 @@ import type {
   RuntimeGraphConfigPayload,
   RuntimeTopologySnapshot,
   ManualGraphEntryPayload,
+  ChatSessionSummary,
+  ChatHistoryMessage,
 } from '../types';
 
 const api = axios.create({
@@ -90,6 +94,22 @@ export const logsApi = {
     return response.data;
   },
 
+  queryLogs: async (params?: {
+    source_type?: string;
+    keyword?: string;
+    level?: string;
+    levels?: string;
+    service?: string;
+    start_time?: string;
+    end_time?: string;
+    incident_only?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<Log[]> => {
+    const response = await api.get('/logs/query', { params });
+    return response.data;
+  },
+
   uploadFile: async (file: File): Promise<{ message: string; filename: string }> => {
     const formData = new FormData();
     formData.append('file', file);
@@ -107,6 +127,16 @@ export const logsApi = {
   getStats: async (): Promise<LogStats> => {
     const response = await api.get('/logs/stats');
     return response.data;
+  },
+
+  getConfig: async (): Promise<LogSourceConfig> => {
+    const response = await api.get<ApiResponse<LogSourceConfig>>('/logs/config');
+    return response.data.data;
+  },
+
+  updateConfig: async (payload: LogSourceConfigPayload): Promise<LogSourceConfig> => {
+    const response = await api.put<ApiResponse<LogSourceConfig>>('/logs/config', payload);
+    return response.data.data;
   },
 
   ingestLog: async (log: { level: string; content: string; source?: string }): Promise<Log> => {
@@ -143,8 +173,22 @@ export const knowledgeApi = {
     return response.data;
   },
 
-  chat: async (question: string, analyzeProblem: boolean = false): Promise<unknown> => {
-    const response = await api.get('/knowledge/qa/chat', { params: { question, analyze_problem: analyzeProblem } });
+  chat: async (question: string, analyzeProblem: boolean = false, sessionId?: string): Promise<unknown> => {
+    const response = await api.post('/knowledge/qa/chat', {
+      question,
+      analyze_problem: analyzeProblem,
+      session_id: sessionId,
+    });
+    return response.data;
+  },
+
+  listChatSessions: async (): Promise<{ sessions: ChatSessionSummary[] }> => {
+    const response = await api.get('/knowledge/qa/sessions');
+    return response.data;
+  },
+
+  getChatSession: async (sessionId: string): Promise<{ session: ChatSessionSummary; messages: ChatHistoryMessage[] }> => {
+    const response = await api.get(`/knowledge/qa/sessions/${sessionId}`);
     return response.data;
   },
 

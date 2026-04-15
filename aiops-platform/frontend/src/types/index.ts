@@ -33,14 +33,18 @@ export interface RegisterParams {
 }
 
 export interface Log {
-  id: number;
+  id: string | number;
   timestamp: string;
   level: string;
   content: string;
   source: string;
+  source_type?: string;
+  service?: string | null;
+  labels?: Record<string, string> | null;
   is_anomaly: boolean;
   anomaly_score: number | null;
   user_feedback: boolean | null;
+  raw?: Record<string, unknown> | null;
 }
 
 export interface LogStats {
@@ -49,6 +53,24 @@ export interface LogStats {
   anomaly_rate: number;
   level_distribution: Record<string, number>;
   top_patterns: Array<{ content: string; score: number }>;
+}
+
+export interface LogSourceConfig {
+  elasticsearchEnabled: boolean;
+  elasticsearchUrl: string;
+  elasticsearchIndexPattern: string;
+  lokiEnabled: boolean;
+  lokiUrl: string;
+  updatedBy?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LogSourceConfigPayload {
+  elasticsearch_enabled: boolean;
+  elasticsearch_url: string;
+  elasticsearch_index_pattern: string;
+  loki_enabled: boolean;
+  loki_url: string;
 }
 
 export interface AgentTask {
@@ -177,6 +199,32 @@ export interface DiagnoseResponse {
   task_id: string;
   status: string;
   message: string;
+}
+
+export interface ChatSessionSummary {
+  session_id: string;
+  title: string;
+  analyze_problem: boolean;
+  last_message: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ChatHistoryMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  mode?: string | null;
+  intent?: {
+    intent: string;
+    entities: Record<string, string>;
+    confidence: string;
+  } | null;
+  knowledge?: {
+    knowledge_report?: string;
+  } | null;
+  runtime_topology?: RuntimeTopologySnapshot | null;
+  created_at?: string;
 }
 
 export interface LLMProvider {

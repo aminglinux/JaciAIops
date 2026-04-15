@@ -16,7 +16,7 @@ import {
 import { CloseOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
-import type { LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
+import type { ChatHistoryMessage, ChatSessionSummary, LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
 
 const { TextArea } = Input;
 const { Text, Paragraph } = Typography;
@@ -159,20 +159,35 @@ interface Message {
   };
 }
 
+const buildWelcomeMessage = (): Message => ({
+  id: 0,
+  type: 'assistant',
+  content: '你好，我是智能助手。默认可直接通用问答；打开“分析问题”后，我会按运维分析流程帮你定位问题。',
+});
+
+const mapHistoryMessage = (message: ChatHistoryMessage): Message => ({
+  id: message.id,
+  type: message.role,
+  content: message.content,
+  extra: message.role === 'assistant' ? {
+    intent: message.intent || undefined,
+    knowledge: message.knowledge?.knowledge_report,
+    mode: message.mode || undefined,
+    runtimeTopology: message.runtime_topology || null,
+  } : undefined,
+});
+
 const AssistantWidget = () => {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 0,
-      type: 'assistant',
-      content: '你好，我是智能助手。默认可直接通用问答；打开“分析问题”后，我会按运维分析流程帮你定位问题。',
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([buildWelcomeMessage()]);
   const [loading, setLoading] = useState(false);
   const [analyzeProblem, setAnalyzeProblem] = useState(false);
   const [runtimeBindings, setRuntimeBindings] = useState<LLMRuntimeBinding[]>([]);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [position, setPosition] = useState({ right: 24, bottom: 88 });
   const [dragging, setDragging] = useState(false);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
@@ -235,6 +250,61 @@ const AssistantWidget = () => {
     return runtimeBindings.find((binding) => binding.sceneKey === sceneKey);
   }, [analyzeProblem, runtimeBindings]);
 
+  const refreshSessions = async (preferredSessionId?: string | null) => {
+    try {
+      const response = await knowledgeApi.listChatSessions();
+      const nextSessions = response.sessions || [];
+      setSessions(nextSessions);
+      if (preferredSessionId) {
+        setActiveSessionId(preferredSessionId);
+        return;
+      }
+      if (!activeSessionId && nextSessions.length > 0) {
+        setActiveSessionId(nextSessions[0].session_id);
+      }
+    } catch (error) {
+      console.error('获取会话历史失败', error);
+    }
+  };
+
+  const loadSessionMessages = async (sessionId: string) => {
+    setSessionLoading(true);
+    try {
+      const response = await knowledgeApi.getChatSession(sessionId);
+      const historyMessages = response.messages?.map(mapHistoryMessage) || [];
+      setMessages(historyMessages.length > 0 ? historyMessages : [buildWelcomeMessage()]);
+      setAnalyzeProblem(Boolean(response.session?.analyze_problem));
+      setActiveSessionId(sessionId);
+    } catch (error) {
+      message.error('加载会话失败');
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const handleNewSession = () => {
+    streamRef.current?.close();
+    streamRef.current = null;
+    setActiveSessionId(null);
+    setMessages([buildWelcomeMessage()]);
+    setAnalyzeProblem(false);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    void refreshSessions();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !activeSessionId || loading) {
+      return;
+    }
+    void loadSessionMessages(activeSessionId);
+  }, [activeSessionId, open, loading]);
+
   const handleSend = async () => {
     if (!input.trim()) {
       message.warning('请输入内容');
@@ -261,22 +331,44 @@ const AssistantWidget = () => {
 
     try {
       streamRef.current?.close();
-      const params = new URLSearchParams({
-        question: currentInput,
-        analyze_problem: String(analyzeProblem),
-      });
-      const eventSource = new EventSource(`/api/knowledge/qa/chat/stream?${params.toString()}`);
-      streamRef.current = eventSource;
+      const token = localStorage.getItem('token');
+      const controller = new AbortController();
+      streamRef.current = { close: () => controller.abort() } as EventSource;
 
-      eventSource.onmessage = (event) => {
-        const payload = JSON.parse(event.data) as {
-          type: 'meta' | 'delta' | 'done';
-          content?: string;
-          mode?: string;
-          intent?: { intent: string; entities: Record<string, string>; confidence: string };
-          knowledge?: { knowledge_report?: string } | null;
-          runtime_topology?: RuntimeTopologySnapshot | null;
-        };
+      const response = await fetch('/api/knowledge/qa/chat/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          question: currentInput,
+          analyze_problem: analyzeProblem,
+          session_id: activeSessionId,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error('stream request failed');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      const handlePayload = (payload: {
+        type: 'meta' | 'delta' | 'done';
+        session_id?: string;
+        content?: string;
+        mode?: string;
+        intent?: { intent: string; entities: Record<string, string>; confidence: string };
+        knowledge?: { knowledge_report?: string } | null;
+        runtime_topology?: RuntimeTopologySnapshot | null;
+      }) => {
+        if (payload.session_id) {
+          setActiveSessionId(payload.session_id);
+        }
 
         if (payload.type === 'meta') {
           setMessages((prev) =>
@@ -325,50 +417,70 @@ const AssistantWidget = () => {
             )
           );
           setLoading(false);
-          eventSource.close();
           streamRef.current = null;
+          void refreshSessions(payload.session_id || activeSessionId);
         }
       };
 
-      eventSource.onerror = async () => {
-        eventSource.close();
-        streamRef.current = null;
-        try {
-          const response = await knowledgeApi.chat(currentInput, analyzeProblem);
-          const updatedMessage: Message = {
-            id: assistantMessage.id,
-            type: 'assistant',
-            content: (response as { answer?: string }).answer || '抱歉，我无法回答这个问题。',
-            loading: false,
-            extra: {
-              intent: (response as { intent?: { intent: string; entities: Record<string, string>; confidence: string } }).intent,
-              knowledge: (response as { knowledge?: { knowledge_report?: string } }).knowledge?.knowledge_report,
-              mode: (response as { mode?: string }).mode,
-              runtimeTopology: (response as { runtime_topology?: RuntimeTopologySnapshot | null }).runtime_topology || null,
-            },
-          };
-          setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? updatedMessage : item)));
-        } catch (error) {
-          const errorMessage: Message = {
-            id: assistantMessage.id,
-            type: 'assistant',
-            content: '抱歉，查询过程中出现错误，请稍后重试。',
-            loading: false,
-          };
-          setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? errorMessage : item)));
-        } finally {
-          setLoading(false);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
         }
-      };
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+
+        for (const event of events) {
+          const dataLine = event
+            .split('\n')
+            .find((line) => line.startsWith('data: '));
+          if (!dataLine) {
+            continue;
+          }
+          handlePayload(JSON.parse(dataLine.slice(6)));
+        }
+      }
     } catch (error) {
-      const errorMessage: Message = {
-        id: assistantMessage.id,
-        type: 'assistant',
-        content: '抱歉，查询过程中出现错误，请稍后重试。',
-        loading: false,
-      };
-      setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? errorMessage : item)));
-      setLoading(false);
+      try {
+        const response = await knowledgeApi.chat(currentInput, analyzeProblem, activeSessionId || undefined);
+        const typed = response as {
+          answer?: string;
+          session_id?: string;
+          intent?: { intent: string; entities: Record<string, string>; confidence: string };
+          knowledge?: { knowledge_report?: string };
+          mode?: string;
+          runtime_topology?: RuntimeTopologySnapshot | null;
+        };
+        if (typed.session_id) {
+          setActiveSessionId(typed.session_id);
+        }
+        const updatedMessage: Message = {
+          id: assistantMessage.id,
+          type: 'assistant',
+          content: typed.answer || '抱歉，我无法回答这个问题。',
+          loading: false,
+          extra: {
+            intent: typed.intent,
+            knowledge: typed.knowledge?.knowledge_report,
+            mode: typed.mode,
+            runtimeTopology: typed.runtime_topology || null,
+          },
+        };
+        setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? updatedMessage : item)));
+        void refreshSessions(typed.session_id || activeSessionId);
+      } catch {
+        const errorMessage: Message = {
+          id: assistantMessage.id,
+          type: 'assistant',
+          content: '抱歉，查询过程中出现错误，请稍后重试。',
+          loading: false,
+        };
+        setMessages((prev) => prev.map((item) => (item.id === assistantMessage.id ? errorMessage : item)));
+      } finally {
+        setLoading(false);
+        streamRef.current = null;
+      }
     }
   };
 
@@ -455,166 +567,228 @@ const AssistantWidget = () => {
             position: 'fixed',
             right: position.right,
             bottom: position.bottom,
-            width: 560,
-            height: 760,
+            width: 920,
+            height: 860,
             zIndex: 1100,
             boxShadow: '0 12px 36px rgba(0,0,0,0.18)',
             borderRadius: 12,
           }}
           bodyStyle={{
-            padding: 16,
+            padding: 0,
             height: 'calc(100% - 57px)',
             display: 'flex',
-            flexDirection: 'column',
           }}
         >
-          <Alert
-            type={activeRuntimeBinding?.source === 'database' ? 'success' : 'warning'}
-            showIcon
-            style={{ marginBottom: 12 }}
-            message={
-              runtimeLoading
-                ? '正在读取当前模型绑定...'
-                : analyzeProblem
-                  ? '当前为“分析问题”模式'
-                  : '当前为“通用问答”模式'
-            }
-            description={
-              runtimeLoading
-                ? '请稍候'
-                : activeRuntimeBinding
-                  ? `当前使用 ${activeRuntimeBinding.providerName} / ${activeRuntimeBinding.model}${activeRuntimeBinding.source === 'env' ? '（未绑定场景模型，使用环境变量 fallback）' : ''}`
-                  : '暂未读取到模型绑定信息'
-            }
-          />
-
-          <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              默认通用问答；打开开关后才走运维分析流程。
-            </Text>
-            <Space size={8}>
-              <Text strong style={{ fontSize: 12 }}>分析问题</Text>
-              <Switch checked={analyzeProblem} onChange={setAnalyzeProblem} />
-            </Space>
+          <div
+            style={{
+              width: 260,
+              borderRight: '1px solid #f0f0f0',
+              padding: 16,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              background: '#fafafa',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <Text strong>历史会话</Text>
+              <Button size="small" onClick={handleNewSession}>新会话</Button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                {sessions.map((session) => (
+                  <Button
+                    key={session.session_id}
+                    type={activeSessionId === session.session_id ? 'primary' : 'default'}
+                    onClick={() => setActiveSessionId(session.session_id)}
+                    style={{
+                      width: '100%',
+                      height: 'auto',
+                      minHeight: 56,
+                      textAlign: 'left',
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      justifyContent: 'flex-start',
+                      padding: '8px 10px',
+                    }}
+                  >
+                    <div style={{ width: '100%', overflow: 'hidden' }}>
+                      <div style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {session.title}
+                      </div>
+                      <div style={{ fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {session.last_message || '暂无消息'}
+                      </div>
+                    </div>
+                  </Button>
+                ))}
+              </Space>
+            </div>
           </div>
 
           <div
-            ref={listContainerRef}
             style={{
               flex: 1,
-              overflowY: 'auto',
-              paddingRight: 4,
-              marginBottom: 12,
+              padding: 16,
+              display: 'flex',
+              flexDirection: 'column',
+              minWidth: 0,
             }}
           >
-            <List
-              dataSource={messages}
-              renderItem={(item) => (
-                <div style={{ marginBottom: 12, textAlign: item.type === 'user' ? 'right' : 'left' }}>
-                  <div
-                    style={{
-                      display: 'inline-block',
-                      width: 'fit-content',
-                      maxWidth: item.type === 'user' ? '56%' : '88%',
-                      minWidth: item.type === 'user' ? 72 : undefined,
-                      textAlign: 'left',
-                      padding: item.type === 'user' ? '8px 10px' : '10px 12px',
-                      borderRadius: 12,
-                      background: item.type === 'user' ? '#1677ff' : '#f5f5f5',
-                      color: item.type === 'user' ? '#fff' : 'inherit',
-                    }}
-                  >
-                    {item.loading ? (
-                      <Spin size="small" />
-                    ) : (
-                      <>
-                        <div
-                          className="assistant-markdown"
-                          style={{ margin: 0 }}
-                          dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(item.content) }}
-                        />
-                        {item.extra?.intent && (
-                          <div style={{ marginTop: 10 }}>
-                            <Divider style={{ margin: '8px 0' }} />
-                            <Space size={4} wrap>
-                              {item.extra.mode && (
-                                <Tag color={item.extra.mode === 'analysis' ? 'red' : 'cyan'}>
-                                  {item.extra.mode === 'analysis' ? '分析问题' : '通用问答'}
-                                </Tag>
-                              )}
-                              <Tag color={getIntentColor(item.extra.intent.intent)}>{item.extra.intent.intent}</Tag>
-                              <Tag>置信度: {item.extra.intent.confidence}</Tag>
-                              {item.extra.intent.entities.service && <Tag color="blue">服务: {item.extra.intent.entities.service}</Tag>}
-                            </Space>
-                          </div>
-                        )}
-                        {item.extra?.knowledge && (
-                          <div style={{ marginTop: 10 }}>
-                            <Divider style={{ margin: '8px 0' }} />
-                            <Text type="secondary" style={{ fontSize: 12 }}>知识库参考：</Text>
-                            <Paragraph
-                              style={{
-                                margin: 0,
-                                fontSize: 12,
-                                whiteSpace: 'pre-wrap',
-                                color: item.type === 'user' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.45)',
-                              }}
-                              ellipsis={{ rows: 3, expandable: true }}
-                            >
-                              {item.extra.knowledge}
-                            </Paragraph>
-                          </div>
-                        )}
-                        {item.extra?.runtimeTopology && (
-                          <div style={{ marginTop: 10 }}>
-                            <Divider style={{ margin: '8px 0' }} />
-                            <Text type="secondary" style={{ fontSize: 12 }}>运行时拓扑：</Text>
-                            <div style={{ marginTop: 6 }}>
-                              {item.extra.runtimeTopology.downstream.slice(0, 3).map((dependency) => (
-                                <Tag key={`${dependency.source_service}-${dependency.target_service}`} color="geekblue">
-                                  {dependency.target_service} · {dependency.avg_latency_ms.toFixed(0)}ms
-                                </Tag>
-                              ))}
-                              {item.extra.runtimeTopology.anomalies.slice(0, 2).map((anomaly) => (
-                                <Tag key={`${anomaly.trace_id}-${anomaly.span_name}`} color="volcano">
-                                  {anomaly.span_name} · {anomaly.duration_ms.toFixed(0)}ms
-                                </Tag>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
+            <Alert
+              type={activeRuntimeBinding?.source === 'database' ? 'success' : 'warning'}
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={
+                runtimeLoading
+                  ? '正在读取当前模型绑定...'
+                  : analyzeProblem
+                    ? '当前为“分析问题”模式'
+                    : '当前为“通用问答”模式'
+              }
+              description={
+                runtimeLoading
+                  ? '请稍候'
+                  : activeRuntimeBinding
+                    ? `当前使用 ${activeRuntimeBinding.providerName} / ${activeRuntimeBinding.model}${activeRuntimeBinding.source === 'env' ? '（未绑定场景模型，使用环境变量 fallback）' : ''}`
+                    : '暂未读取到模型绑定信息'
+              }
             />
-          </div>
 
-          <Space.Compact style={{ width: '100%' }}>
-            <TextArea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder={analyzeProblem ? '输入要分析的运维问题...' : '输入你的问题，和助手直接对话...'}
-              autoSize={{ minRows: 1, maxRows: 4 }}
-              style={{ flex: 1, maxWidth: 460 }}
-              onPressEnter={(event) => {
-                if (!event.shiftKey) {
-                  event.preventDefault();
-                  handleSend();
-                }
+            <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                默认通用问答；打开开关后才走运维分析流程。
+              </Text>
+              <Space size={8}>
+                <Text strong style={{ fontSize: 12 }}>分析问题</Text>
+                <Switch checked={analyzeProblem} onChange={setAnalyzeProblem} />
+              </Space>
+            </div>
+
+            <div
+              ref={listContainerRef}
+              style={{
+                flex: 1,
+                overflowY: 'auto',
+                paddingRight: 4,
+                marginBottom: 12,
               }}
-            />
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              onClick={handleSend}
-              loading={loading}
-              style={{ height: 'auto', minWidth: 88 }}
             >
-              发送
-            </Button>
-          </Space.Compact>
+              {sessionLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 48 }}>
+                  <Spin />
+                </div>
+              ) : (
+                <List
+                  dataSource={messages}
+                  renderItem={(item) => (
+                  <div style={{ marginBottom: 12, textAlign: item.type === 'user' ? 'right' : 'left' }}>
+                    <div
+                      style={{
+                        display: 'inline-block',
+                        width: 'fit-content',
+                        maxWidth: item.type === 'user' ? '56%' : '88%',
+                        minWidth: item.type === 'user' ? 72 : undefined,
+                        textAlign: 'left',
+                        padding: item.type === 'user' ? '8px 10px' : '10px 12px',
+                        borderRadius: 12,
+                        background: item.type === 'user' ? '#1677ff' : '#f5f5f5',
+                        color: item.type === 'user' ? '#fff' : 'inherit',
+                      }}
+                    >
+                      {item.loading ? (
+                        <Spin size="small" />
+                      ) : (
+                        <>
+                          <div
+                            className="assistant-markdown"
+                            style={{ margin: 0 }}
+                            dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(item.content) }}
+                          />
+                          {item.extra?.intent && (
+                            <div style={{ marginTop: 10 }}>
+                              <Divider style={{ margin: '8px 0' }} />
+                              <Space size={4} wrap>
+                                {item.extra.mode && (
+                                  <Tag color={item.extra.mode === 'analysis' ? 'red' : 'cyan'}>
+                                    {item.extra.mode === 'analysis' ? '分析问题' : '通用问答'}
+                                  </Tag>
+                                )}
+                                <Tag color={getIntentColor(item.extra.intent.intent)}>{item.extra.intent.intent}</Tag>
+                                <Tag>置信度: {item.extra.intent.confidence}</Tag>
+                                {item.extra.intent.entities.service && <Tag color="blue">服务: {item.extra.intent.entities.service}</Tag>}
+                              </Space>
+                            </div>
+                          )}
+                          {item.extra?.knowledge && (
+                            <div style={{ marginTop: 10 }}>
+                              <Divider style={{ margin: '8px 0' }} />
+                              <Text type="secondary" style={{ fontSize: 12 }}>知识库参考：</Text>
+                              <Paragraph
+                                style={{
+                                  margin: 0,
+                                  fontSize: 12,
+                                  whiteSpace: 'pre-wrap',
+                                  color: item.type === 'user' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.45)',
+                                }}
+                                ellipsis={{ rows: 3, expandable: true }}
+                              >
+                                {item.extra.knowledge}
+                              </Paragraph>
+                            </div>
+                          )}
+                          {item.extra?.runtimeTopology && (
+                            <div style={{ marginTop: 10 }}>
+                              <Divider style={{ margin: '8px 0' }} />
+                              <Text type="secondary" style={{ fontSize: 12 }}>运行时拓扑：</Text>
+                              <div style={{ marginTop: 6 }}>
+                                {item.extra.runtimeTopology.downstream.slice(0, 3).map((dependency) => (
+                                  <Tag key={`${dependency.source_service}-${dependency.target_service}`} color="geekblue">
+                                    {dependency.target_service} · {dependency.avg_latency_ms.toFixed(0)}ms
+                                  </Tag>
+                                ))}
+                                {item.extra.runtimeTopology.anomalies.slice(0, 2).map((anomaly) => (
+                                  <Tag key={`${anomaly.trace_id}-${anomaly.span_name}`} color="volcano">
+                                    {anomaly.span_name} · {anomaly.duration_ms.toFixed(0)}ms
+                                  </Tag>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  )}
+                />
+              )}
+            </div>
+
+            <Space.Compact style={{ width: '100%' }}>
+              <TextArea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder={analyzeProblem ? '输入要分析的运维问题...' : '输入你的问题，和助手直接对话...'}
+                autoSize={{ minRows: 1, maxRows: 4 }}
+                style={{ flex: 1 }}
+                onPressEnter={(event) => {
+                  if (!event.shiftKey) {
+                    event.preventDefault();
+                    handleSend();
+                  }
+                }}
+              />
+              <Button
+                type="primary"
+                icon={<SendOutlined />}
+                onClick={handleSend}
+                loading={loading}
+                style={{ height: 'auto', minWidth: 88 }}
+              >
+                发送
+              </Button>
+            </Space.Compact>
+          </div>
         </Card>
       )}
     </>

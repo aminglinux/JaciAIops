@@ -7,15 +7,19 @@ from neo4j import GraphDatabase
 import re
 import json
 import threading
+import uuid
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.api.auth import User, get_current_user, require_admin
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import ChatMessage, ChatSession, SessionLocal, get_db
 from app.observability import runtime_topology_service
 from app.services import llm_config_manager, runtime_graph_config_manager
+from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+logger = get_logger("knowledge_api")
 
 DEFAULT_TOPOLOGY_NODE_LIMIT = 40
 DEFAULT_TOPOLOGY_EDGE_LIMIT = 120
@@ -80,6 +84,12 @@ class GraphNodeUpdatePayload(BaseModel):
 class GraphRelationUpdatePayload(BaseModel):
     relation_type: str
     properties: Dict[str, Any] = {}
+
+
+class ChatRequest(BaseModel):
+    question: str
+    analyze_problem: bool = False
+    session_id: Optional[str] = None
 
 
 ALLOWED_NODE_TYPES = {
@@ -866,49 +876,229 @@ async def import_graph_data(
         },
     }
 
-@router.get("/qa/chat")
-async def chat_with_knowledge(question: str, analyze_problem: bool = False):
-    return await _build_chat_response(question, analyze_problem)
+@router.get("/qa/sessions")
+def list_chat_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == current_user.id)
+        .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+        .limit(30)
+        .all()
+    )
+    return {"sessions": [_serialize_chat_session(session) for session in sessions]}
 
 
-@router.get("/qa/chat/stream")
-async def chat_with_knowledge_stream(question: str, analyze_problem: bool = False):
+@router.get("/qa/sessions/{session_id}")
+def get_chat_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session = (
+        db.query(ChatSession)
+        .filter(ChatSession.session_id == session_id, ChatSession.user_id == current_user.id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "session": _serialize_chat_session(session),
+        "messages": [_serialize_chat_message(message) for message in session.messages],
+    }
+
+
+@router.post("/qa/chat")
+async def chat_with_knowledge(request: ChatRequest, current_user: User = Depends(get_current_user)):
+    try:
+        session_db = SessionLocal()
+        try:
+            chat_session = _get_or_create_chat_session(
+                session_db,
+                current_user,
+                request.session_id,
+                request.question,
+                request.analyze_problem,
+            )
+            _save_chat_message(session_db, chat_session, "user", request.question)
+        finally:
+            session_db.close()
+
+        result = await _generate_chat_result(request.question, request.analyze_problem)
+
+        save_db = SessionLocal()
+        try:
+            persisted_session = _get_or_create_chat_session(
+                save_db,
+                current_user,
+                chat_session.session_id,
+                request.question,
+                request.analyze_problem,
+            )
+            _save_chat_message(
+                save_db,
+                persisted_session,
+                "assistant",
+                result.get("answer", "") or "",
+                mode=result.get("mode"),
+                intent=result.get("intent"),
+                knowledge=result.get("knowledge"),
+                runtime_topology=result.get("runtime_topology"),
+            )
+        finally:
+            save_db.close()
+
+        result["session_id"] = chat_session.session_id
+        return result
+    except Exception as exc:
+        logger.exception("chat_with_knowledge failed: %s", exc)
+        return _build_chat_error_response(request.question, request.analyze_problem, request.session_id)
+
+
+@router.post("/qa/chat/stream")
+async def chat_with_knowledge_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
     async def event_generator():
-        result = await _build_chat_response(question, analyze_problem)
-        meta_payload = {
-            "type": "meta",
-            "mode": result.get("mode"),
-            "intent": result.get("intent"),
-            "knowledge": result.get("knowledge"),
-            "runtime_topology": result.get("runtime_topology"),
-            "rag_context": result.get("rag_context"),
-        }
-        yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
+        accumulated_answer = ""
+        session_identifier = request.session_id
 
-        answer = result.get("answer", "") or ""
-        chunk_size = 24
-        for index in range(0, len(answer), chunk_size):
-            delta_payload = {
-                "type": "delta",
-                "content": answer[index:index + chunk_size],
+        try:
+            prepare_db = SessionLocal()
+            try:
+                chat_session = _get_or_create_chat_session(
+                    prepare_db,
+                    current_user,
+                    request.session_id,
+                    request.question,
+                    request.analyze_problem,
+                )
+                session_identifier = chat_session.session_id
+                _save_chat_message(prepare_db, chat_session, "user", request.question)
+            finally:
+                prepare_db.close()
+
+            result = await _prepare_chat_response(request.question, request.analyze_problem)
+            meta_payload = {
+                "type": "meta",
+                "session_id": session_identifier,
+                "mode": result.get("mode"),
+                "intent": result.get("intent"),
+                "knowledge": result.get("knowledge"),
+                "runtime_topology": result.get("runtime_topology"),
+                "rag_context": result.get("rag_context"),
             }
-            yield f"data: {json.dumps(delta_payload, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(meta_payload, ensure_ascii=False)}\n\n"
 
-        yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+            if result.get("prompt"):
+                try:
+                    for chunk in _stream_llm_answer(result["scene_key"], result["prompt"]):
+                        if chunk:
+                            accumulated_answer += chunk
+                            yield f"data: {json.dumps({'type': 'delta', 'content': chunk}, ensure_ascii=False)}\n\n"
+                except Exception as exc:
+                    logger.exception("stream_llm_answer failed: %s", exc)
+                    fallback_answer = result.get("fallback_answer") or _build_simple_chat_response(request.question)
+                    if fallback_answer:
+                        accumulated_answer = fallback_answer
+                        yield f"data: {json.dumps({'type': 'delta', 'content': fallback_answer}, ensure_ascii=False)}\n\n"
+            else:
+                accumulated_answer = result.get("answer", "") or ""
+                if accumulated_answer:
+                    yield f"data: {json.dumps({'type': 'delta', 'content': accumulated_answer}, ensure_ascii=False)}\n\n"
+
+            save_db = SessionLocal()
+            try:
+                persisted_session = _get_or_create_chat_session(
+                    save_db,
+                    current_user,
+                    session_identifier,
+                    request.question,
+                    request.analyze_problem,
+                )
+                _save_chat_message(
+                    save_db,
+                    persisted_session,
+                    "assistant",
+                    accumulated_answer or "抱歉，我暂时无法回答这个问题。",
+                    mode=result.get("mode"),
+                    intent=result.get("intent"),
+                    knowledge=result.get("knowledge"),
+                    runtime_topology=result.get("runtime_topology"),
+                )
+            finally:
+                save_db.close()
+
+            yield f"data: {json.dumps({'type': 'done', 'session_id': session_identifier}, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.exception("chat_with_knowledge_stream failed: %s", exc)
+            result = _build_chat_error_response(request.question, request.analyze_problem, session_identifier)
+            save_db = SessionLocal()
+            try:
+                persisted_session = _get_or_create_chat_session(
+                    save_db,
+                    current_user,
+                    session_identifier,
+                    request.question,
+                    request.analyze_problem,
+                )
+                _save_chat_message(
+                    save_db,
+                    persisted_session,
+                    "assistant",
+                    result["answer"],
+                    mode=result.get("mode"),
+                    intent=result.get("intent"),
+                )
+            finally:
+                save_db.close()
+            yield f"data: {json.dumps({'type': 'meta', 'session_id': session_identifier, 'mode': result.get('mode'), 'intent': result.get('intent'), 'knowledge': None, 'runtime_topology': None, 'rag_context': ''}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'delta', 'content': result['answer']}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': session_identifier}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-async def _build_chat_response(question: str, analyze_problem: bool = False) -> Dict[str, Any]:
-    from app.agents import IntentParseAgent, KnowledgeExpertAgent
+def _build_chat_error_response(question: str, analyze_problem: bool = False, session_id: Optional[str] = None) -> Dict[str, Any]:
+    answer = (
+        "智能助手暂时遇到内部错误。"
+        "你可以稍后重试，或补充服务名、故障现象、日志关键词，我会先按简化模式继续回答。"
+    )
+    return {
+        "question": question,
+        "session_id": session_id,
+        "mode": "analysis" if analyze_problem else "general_chat",
+        "intent": {
+            "intent": "GENERAL_QA",
+            "confidence": "LOW",
+            "entities": {},
+            "normalized_query": question,
+            "ner_entities": [],
+            "keywords": [],
+            "clarification_needed": False,
+        },
+        "knowledge": None,
+        "runtime_topology": None,
+        "rag_context": "",
+        "answer": answer,
+    }
+
+
+async def _prepare_chat_response(question: str, analyze_problem: bool = False) -> Dict[str, Any]:
+    from app.agents.intent_parse import IntentParseAgent
+    from app.agents.knowledge import KnowledgeExpertAgent
 
     if not analyze_problem:
         runtime_topology = await _maybe_get_runtime_topology_from_question(question)
         runtime_topology_payload = runtime_topology.model_dump() if runtime_topology else None
-        answer, rag_context = await _general_chat(question, runtime_topology_payload)
+        rag_context = await _query_rag_for_context(question)
+        if _is_simple_chat_text(question):
+            answer = _build_simple_chat_response(question)
+            prompt = None
+            fallback_answer = answer
+        else:
+            prompt = _build_general_chat_prompt(question, rag_context, runtime_topology_payload)
+            answer = ""
+            fallback_answer = rag_context or _build_simple_chat_response(question)
         return {
             "question": question,
             "mode": "general_chat",
+            "scene_key": "general_chat",
+            "prompt": prompt,
+            "fallback_answer": fallback_answer,
             "intent": {
                 "intent": "GENERAL_QA",
                 "confidence": "MEDIUM",
@@ -928,6 +1118,9 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
         return {
             "question": question,
             "mode": "general_chat",
+            "scene_key": None,
+            "prompt": None,
+            "fallback_answer": _build_simple_chat_response(question),
             "intent": {
                 "intent": "GENERAL_QA",
                 "confidence": "HIGH",
@@ -952,6 +1145,9 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
         return {
             "question": question,
             "mode": "analysis",
+            "scene_key": None,
+            "prompt": None,
+            "fallback_answer": "我暂时无法完成深度检索，但可以先陪你做简单交流。若你要排查问题，请补充服务名、异常现象或日志关键词。",
             "intent": {
                 "intent": "GENERAL_QA",
                 "confidence": "LOW",
@@ -975,6 +1171,9 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
         return {
             "question": question,
             "mode": "general_chat",
+            "scene_key": None,
+            "prompt": None,
+            "fallback_answer": answer,
             "intent": intent.model_dump(),
             "knowledge": None,
             "runtime_topology": None,
@@ -993,24 +1192,61 @@ async def _build_chat_response(question: str, analyze_problem: bool = False) -> 
         except Exception:
             runtime_topology = None
 
-    knowledge = await knowledge_agent.query(service, symptom)
+    try:
+        knowledge = await knowledge_agent.query(service, symptom)
+    except Exception as exc:
+        logger.exception("knowledge_agent.query failed: %s", exc)
+        return {
+            "question": question,
+            "mode": "analysis",
+            "scene_key": None,
+            "prompt": None,
+            "fallback_answer": "知识检索暂时不可用，但你可以继续提供服务名、现象或日志，我先帮你做基础分析。",
+            "intent": intent.model_dump(),
+            "knowledge": None,
+            "runtime_topology": runtime_topology.model_dump() if runtime_topology else None,
+            "rag_context": "",
+            "answer": "知识检索暂时不可用，但你可以继续提供服务名、现象或日志，我先帮你做基础分析。",
+        }
+
     rag_answer = await _query_rag_for_context(question)
-    answer = _compose_qa_answer(
+    fallback_answer = _compose_qa_answer(
         knowledge.knowledge_report,
         rag_answer,
         intent.intent,
         runtime_topology=runtime_topology.model_dump() if runtime_topology else None,
     )
+    prompt = _build_analysis_chat_prompt(
+        question,
+        intent.model_dump(),
+        knowledge.model_dump(),
+        rag_answer,
+        runtime_topology.model_dump() if runtime_topology else None,
+    )
 
     return {
         "question": question,
         "mode": "analysis",
+        "scene_key": "knowledge_analysis",
+        "prompt": prompt,
+        "fallback_answer": fallback_answer,
         "intent": intent.model_dump(),
         "knowledge": knowledge.model_dump(),
         "runtime_topology": runtime_topology.model_dump() if runtime_topology else None,
         "rag_context": rag_answer,
-        "answer": answer,
+        "answer": "",
     }
+
+
+async def _generate_chat_result(question: str, analyze_problem: bool = False) -> Dict[str, Any]:
+    result = await _prepare_chat_response(question, analyze_problem)
+    if result.get("prompt"):
+        try:
+            result["answer"] = _generate_llm_answer(result["scene_key"], result["prompt"]).strip()
+        except Exception as exc:
+            logger.exception("generate_llm_answer failed: %s", exc)
+            result["answer"] = result.get("fallback_answer") or ""
+    return result
 
 async def _query_rag_for_context(question: str) -> str:
     try:
@@ -1054,6 +1290,32 @@ async def _general_chat(question: str, runtime_topology: Optional[Dict[str, Any]
     return _build_simple_chat_response(question), ""
 
 
+def _generate_llm_answer(scene_key: str, prompt: str) -> str:
+    client, llm_config = llm_config_manager.get_client_for_scene(scene_key)
+    response = client.chat.completions.create(
+        model=llm_config.model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=llm_config.temperature,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+def _stream_llm_answer(scene_key: str, prompt: str):
+    client, llm_config = llm_config_manager.get_client_for_scene(scene_key)
+    stream = client.chat.completions.create(
+        model=llm_config.model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=llm_config.temperature,
+        stream=True,
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = getattr(chunk.choices[0].delta, "content", None)
+        if delta:
+            yield delta
+
+
 def _build_general_chat_prompt(question: str, rag_context: str, runtime_topology: Optional[Dict[str, Any]] = None) -> str:
     context_block = f"\n参考知识：{rag_context}\n" if rag_context else "\n当前没有检索到额外知识上下文。\n"
     runtime_block = (
@@ -1068,6 +1330,31 @@ def _build_general_chat_prompt(question: str, rag_context: str, runtime_topology
         "并在合适时提醒用户可以打开“分析问题”开关获取更深入的定位建议。"
         f"{context_block}{runtime_block}\n"
         f"用户问题：{question}"
+    )
+
+
+def _build_analysis_chat_prompt(
+    question: str,
+    intent: Dict[str, Any],
+    knowledge: Dict[str, Any],
+    rag_context: str,
+    runtime_topology: Optional[Dict[str, Any]] = None,
+) -> str:
+    runtime_block = (
+        json.dumps(runtime_topology, ensure_ascii=False, indent=2)
+        if runtime_topology else
+        "暂无运行时拓扑数据"
+    )
+    return (
+        "你是 AIOps 平台的运维分析助手。"
+        "请结合意图识别、知识图谱、RAG 资料和运行时拓扑，输出结构化、简洁、可执行的建议。"
+        "优先给出：现象判断、可能根因、排查步骤、建议操作、风险提示。"
+        "如果信息不足，要明确说明还缺什么。"
+        f"\n用户问题：{question}"
+        f"\n意图识别：{json.dumps(intent, ensure_ascii=False, indent=2)}"
+        f"\n知识分析：{json.dumps(knowledge, ensure_ascii=False, indent=2)}"
+        f"\nRAG 参考：{rag_context or '暂无'}"
+        f"\n运行时拓扑：{runtime_block}"
     )
 
 
@@ -1187,6 +1474,96 @@ def _get_mock_kg_data(service: str) -> dict:
         "status": "running",
         "owner": "ops-team"
     }
+
+
+def _truncate_session_title(question: str) -> str:
+    normalized = " ".join((question or "").strip().split())
+    return normalized[:40] or "新会话"
+
+
+def _serialize_chat_session(session: ChatSession) -> Dict[str, Any]:
+    latest_message = session.messages[-1] if session.messages else None
+    return {
+        "session_id": session.session_id,
+        "title": session.title,
+        "analyze_problem": session.analyze_problem,
+        "last_message": latest_message.content if latest_message else "",
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+    }
+
+
+def _serialize_chat_message(message: ChatMessage) -> Dict[str, Any]:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "mode": message.mode,
+        "intent": json.loads(message.intent_json) if message.intent_json else None,
+        "knowledge": json.loads(message.knowledge_json) if message.knowledge_json else None,
+        "runtime_topology": json.loads(message.runtime_topology_json) if message.runtime_topology_json else None,
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+    }
+
+
+def _get_or_create_chat_session(
+    db: Session,
+    user: User,
+    session_id: Optional[str],
+    question: str,
+    analyze_problem: bool,
+) -> ChatSession:
+    session = None
+    if session_id:
+        session = (
+            db.query(ChatSession)
+            .filter(ChatSession.session_id == session_id, ChatSession.user_id == user.id)
+            .first()
+        )
+
+    if session is None:
+        session = ChatSession(
+            session_id=session_id or str(uuid.uuid4()),
+            user_id=user.id,
+            title=_truncate_session_title(question),
+            analyze_problem=analyze_problem,
+        )
+    else:
+        session.analyze_problem = analyze_problem
+        if not session.title or session.title == "新会话":
+            session.title = _truncate_session_title(question)
+
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def _save_chat_message(
+    db: Session,
+    session: ChatSession,
+    role: str,
+    content: str,
+    mode: Optional[str] = None,
+    intent: Optional[Dict[str, Any]] = None,
+    knowledge: Optional[Dict[str, Any]] = None,
+    runtime_topology: Optional[Dict[str, Any]] = None,
+) -> ChatMessage:
+    message_record = ChatMessage(
+        session_id=session.id,
+        role=role,
+        content=content,
+        mode=mode,
+        intent_json=json.dumps(intent, ensure_ascii=False) if intent else None,
+        knowledge_json=json.dumps(knowledge, ensure_ascii=False) if knowledge else None,
+        runtime_topology_json=json.dumps(runtime_topology, ensure_ascii=False) if runtime_topology else None,
+    )
+    db.add(message_record)
+    session.updated_at = datetime.utcnow()
+    db.add(session)
+    db.commit()
+    db.refresh(message_record)
+    return message_record
 
 def _get_mock_rag_docs(query: str) -> List[dict]:
     return [

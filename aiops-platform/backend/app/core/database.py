@@ -23,6 +23,7 @@ class User(Base):
     scope = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
 class Log(Base):
     __tablename__ = "logs"
@@ -145,6 +146,51 @@ class RuntimeGraphConfig(Base):
     updated_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class LogSourceConfig(Base):
+    __tablename__ = "log_source_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    elasticsearch_enabled = Column(Boolean, default=True, nullable=False)
+    elasticsearch_url = Column(String(255), default="http://localhost:9200", nullable=False)
+    elasticsearch_index_pattern = Column(String(255), default="logstash-*", nullable=False)
+    loki_enabled = Column(Boolean, default=True, nullable=False)
+    loki_url = Column(String(255), default="http://localhost:3100", nullable=False)
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(36), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(255), default="新会话", nullable=False)
+    analyze_problem = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="chat_sessions")
+    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.created_at")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False, index=True)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, default="", nullable=False)
+    mode = Column(String(50), nullable=True)
+    intent_json = Column(Text, nullable=True)
+    knowledge_json = Column(Text, nullable=True)
+    runtime_topology_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("ChatSession", back_populates="messages")
 
 def init_db():
     Base.metadata.create_all(bind=engine)
