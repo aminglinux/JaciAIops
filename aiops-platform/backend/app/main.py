@@ -8,6 +8,7 @@ from app.core.database import init_db
 from app.api import api_router
 from app.api.auth import router as auth_router, create_default_users
 from app.api.approval import router as approval_router
+from app.api.knowledge import close_neo4j_driver, init_neo4j_schema
 from app.agents.knowledge import KnowledgeExpertAgent
 from app.services import llm_config_manager
 from app.utils.logger import setup_logger
@@ -22,10 +23,12 @@ async def lifespan(app: FastAPI):
     create_default_users()
     llm_config_manager.bootstrap_defaults()
     validate_security_settings()
+    init_neo4j_schema()
     _knowledge_agent_instance = KnowledgeExpertAgent()
     yield
     if _knowledge_agent_instance is not None:
         _knowledge_agent_instance.close()
+    close_neo4j_driver()
 
 app = FastAPI(
     title=settings.APP_NAME,

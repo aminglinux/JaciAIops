@@ -19,6 +19,8 @@ const getApiErrorMessage = (error: unknown, fallback: string) => {
   return response?.data?.detail || response?.data?.message || fallback;
 };
 
+const looksLikeServiceName = (value: string) => /^[A-Za-z][A-Za-z0-9_-]{2,}$/.test(value);
+
 interface KGNode {
   id: string;
   label: string;
@@ -112,9 +114,13 @@ const KnowledgeGraph = () => {
     try {
       const response = await knowledgeApi.queryKG(undefined, query);
       setKgResult(response as KGQueryResult);
-      
-      const topology = await knowledgeApi.getTopology(query);
-      setTopologyData(topology as { nodes: KGNode[]; edges: KGEdge[] });
+
+      if (looksLikeServiceName(query)) {
+        const topology = await knowledgeApi.getTopology(query, 1);
+        setTopologyData(topology as { nodes: KGNode[]; edges: KGEdge[] });
+      } else {
+        setTopologyData(null);
+      }
     } catch (error) {
       message.error('查询失败');
     } finally {

@@ -6,6 +6,7 @@ import httpx
 from neo4j import GraphDatabase
 import re
 import json
+import threading
 from sqlalchemy.orm import Session
 
 from app.api.auth import User, get_current_user, require_admin
@@ -18,6 +19,10 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 DEFAULT_TOPOLOGY_NODE_LIMIT = 40
 DEFAULT_TOPOLOGY_EDGE_LIMIT = 120
+MAX_TOPOLOGY_DEPTH = 2
+
+_neo4j_driver = None
+_neo4j_driver_lock = threading.Lock()
 
 class KGQueryRequest(BaseModel):
     query: str
@@ -101,6 +106,21 @@ ALLOWED_RELATION_TYPES = {
     "USES_MQ",
 }
 
+SEARCHABLE_NODE_TYPES = [
+    "Service",
+    "Application",
+    "Server",
+    "Database",
+    "Cache",
+    "MQ",
+    "Gateway",
+    "Cluster",
+    "Namespace",
+    "Middleware",
+]
+
+TOPOLOGY_RELATION_PATTERN = "|".join(sorted(ALLOWED_RELATION_TYPES))
+
 
 def _sanitize_label(value: str, allowed_values: Optional[set[str]] = None) -> str:
     normalized = (value or "").strip()
@@ -158,10 +178,53 @@ def _merge_node(session, node_data: Dict[str, Any], updated_by: str) -> Dict[str
     return {"label": primary_label, "labelExpression": label_expression, "name": name, "properties": properties}
 
 def get_neo4j_driver():
-    return GraphDatabase.driver(
-        settings.NEO4J_URI,
-        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+    global _neo4j_driver
+    if _neo4j_driver is None:
+        with _neo4j_driver_lock:
+            if _neo4j_driver is None:
+                _neo4j_driver = GraphDatabase.driver(
+                    settings.NEO4J_URI,
+                    auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+                    max_connection_pool_size=20,
+                )
+    return _neo4j_driver
+
+
+def close_neo4j_driver():
+    global _neo4j_driver
+    with _neo4j_driver_lock:
+        if _neo4j_driver is not None:
+            _neo4j_driver.close()
+            _neo4j_driver = None
+
+
+def init_neo4j_schema():
+    index_statements = [
+        f"CREATE INDEX {label.lower()}_name_index IF NOT EXISTS FOR (n:{label}) ON (n.name)"
+        for label in SEARCHABLE_NODE_TYPES
+    ]
+    index_statements.extend(
+        [
+            "CREATE INDEX server_ip_index IF NOT EXISTS FOR (n:Server) ON (n.ip)",
+            "CREATE FULLTEXT INDEX entityIndex IF NOT EXISTS "
+            f"FOR (n:{'|'.join(SEARCHABLE_NODE_TYPES)}) ON EACH [n.name, n.ip]",
+        ]
     )
+    try:
+        driver = get_neo4j_driver()
+        with driver.session() as session:
+            for statement in index_statements:
+                session.run(statement).consume()
+    except Exception:
+        close_neo4j_driver()
+
+
+def _match_named_node_cypher(alias: str = "s") -> str:
+    branches = [
+        f"MATCH ({alias}:{label} {{name: $name}}) RETURN {alias}"
+        for label in SEARCHABLE_NODE_TYPES
+    ]
+    return "CALL {\n" + "\nUNION\n".join(branches) + f"\n}}\nWITH {alias} LIMIT 1"
 
 @router.get("/query")
 async def query_knowledge_graph(service: str = None, query: str = None):
@@ -175,8 +238,6 @@ async def query_knowledge_graph(service: str = None, query: str = None):
                 result = _query_by_natural_language(session, query)
             else:
                 return {"error": "请提供 service 或 query 参数"}
-        
-        driver.close()
         
         return {
             "query": query or f"查询 {service} 的详细信息",
@@ -192,8 +253,8 @@ async def query_knowledge_graph(service: str = None, query: str = None):
         }
 
 def _query_service_info(session, service_name: str) -> Dict:
-    result = session.run("""
-        MATCH (s {name: $name})
+    result = session.run(f"""
+        {_match_named_node_cypher()}
         OPTIONAL MATCH (s)-[r:DEPENDS_ON]->(dep)
         OPTIONAL MATCH (s)-[r2:RUNS_ON]->(run)
         OPTIONAL MATCH (s)-[r3:CONNECTED_TO]->(conn)
@@ -235,8 +296,9 @@ def _query_by_natural_language(session, query: str) -> Dict:
     
     if "运行" in query and "服务器" in query:
         if service_name:
-            result = session.run("""
-                MATCH (s {name: $name})-[r:RUNS_ON]->(server)
+            result = session.run(f"""
+                {_match_named_node_cypher()}
+                MATCH (s)-[r:RUNS_ON]->(server)
                 RETURN s.name as service, collect({name: server.name, ip: server.ip, type: labels(server)[0]}) as servers
             """, name=service_name)
             record = result.single()
@@ -249,8 +311,9 @@ def _query_by_natural_language(session, query: str) -> Dict:
     
     if "依赖" in query or "depend" in query_lower:
         if service_name:
-            result = session.run("""
-                MATCH (s {name: $name})-[r:DEPENDS_ON]->(dep)
+            result = session.run(f"""
+                {_match_named_node_cypher()}
+                MATCH (s)-[r:DEPENDS_ON]->(dep)
                 RETURN s.name as service, collect({name: dep.name, type: labels(dep)[0]}) as deps
             """, name=service_name)
             record = result.single()
@@ -271,8 +334,8 @@ def _query_by_natural_language(session, query: str) -> Dict:
         return {"databases": databases}
     
     if service_name:
-        result = session.run("""
-            MATCH (s {name: $name})
+        result = session.run(f"""
+            {_match_named_node_cypher()}
             OPTIONAL MATCH (s)-[r:DEPENDS_ON]->(dep)
             OPTIONAL MATCH (s)-[r2:RUNS_ON]->(run)
             OPTIONAL MATCH (s)-[r3:CONNECTED_TO]->(conn)
@@ -303,8 +366,8 @@ def _query_by_natural_language(session, query: str) -> Dict:
     
     if not nodes:
         result = session.run("""
-            MATCH (n) 
-            WHERE n.name CONTAINS $keyword OR n.ip CONTAINS $keyword
+            MATCH (n:Server)
+            WHERE n.name STARTS WITH $keyword OR n.ip STARTS WITH $keyword
             RETURN labels(n)[0] as type, n.name as name, n as properties 
             LIMIT 5
         """, keyword=query.split()[0] if query.split() else query)
@@ -351,12 +414,14 @@ async def query_rag(request: RAGQueryRequest):
 @router.get("/topology")
 async def get_topology(service: str = None, depth: int = 2):
     try:
+        safe_depth = max(1, min(depth, MAX_TOPOLOGY_DEPTH))
         driver = get_neo4j_driver()
         
         with driver.session() as session:
             if service:
                 result = session.run(f"""
-                    MATCH path = (s {{name: $name}})-[*1..{depth}]-(related)
+                    {_match_named_node_cypher()}
+                    MATCH path = (s)-[:{TOPOLOGY_RELATION_PATTERN}*1..{safe_depth}]-(related)
                     UNWIND relationships(path) as r
                     RETURN startNode(r) as a,
                            endNode(r) as b,
@@ -370,8 +435,11 @@ async def get_topology(service: str = None, depth: int = 2):
                 sampled_nodes = []
             else:
                 sampled_node_records = session.run(
-                    """
-                    MATCH (n)
+                    f"""
+                    CALL {{
+                    {' UNION '.join([f'MATCH (n:{label}) RETURN n LIMIT 8' for label in SEARCHABLE_NODE_TYPES])}
+                    }}
+                    WITH DISTINCT n
                     RETURN n
                     ORDER BY coalesce(n.name, '')
                     LIMIT $node_limit
@@ -448,8 +516,6 @@ async def get_topology(service: str = None, depth: int = 2):
                         "type": record.get("rel_type"),
                         "properties": dict(record.get("rel_props") or {}),
                     })
-        
-        driver.close()
         
         return {
             "nodes": list(nodes.values()),
@@ -540,7 +606,6 @@ def create_manual_graph_entry(
                     target_properties=relation.target_properties,
                     updated_by=current_user.username,
                 )
-        driver.close()
         return {
             "code": 200,
             "message": "录入成功",
@@ -576,7 +641,6 @@ def update_graph_node(
                 node_id=node_id,
                 properties=properties,
             ).single()
-        driver.close()
         if not record:
             raise HTTPException(status_code=404, detail="节点不存在")
         return {
@@ -612,7 +676,6 @@ def delete_graph_node(
                 """,
                 node_id=node_id,
             ).single()
-        driver.close()
         if not record:
             raise HTTPException(status_code=404, detail="节点不存在")
         return {"code": 200, "message": "删除成功", "data": {"name": record["name"]}}
@@ -643,7 +706,6 @@ def update_graph_relation(
                 relation_id=relation_id,
             ).single()
             if not record:
-                driver.close()
                 raise HTTPException(status_code=404, detail="关系不存在")
 
             source = record["source"]
@@ -668,7 +730,6 @@ def update_graph_relation(
                 target_id=target_id,
                 properties=properties,
             ).single()
-        driver.close()
         return {
             "code": 200,
             "message": "更新成功",
@@ -706,7 +767,6 @@ def delete_graph_relation(
                 """,
                 relation_id=relation_id,
             ).single()
-        driver.close()
         if not record:
             raise HTTPException(status_code=404, detail="关系不存在")
         return {
@@ -782,7 +842,6 @@ async def import_graph_data(
                     imported_relations += 1
                 except Exception as record_exc:
                     failed_records.append({"index": index, "error": str(record_exc)})
-        driver.close()
     except HTTPException:
         raise
     except Exception as exc:
