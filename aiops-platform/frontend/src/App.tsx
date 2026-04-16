@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Layout, Menu, Dropdown, Avatar, Space, Spin } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
   FileTextOutlined,
@@ -13,6 +14,7 @@ import {
 
 import Dashboard from './pages/Dashboard';
 import LogList from './pages/LogList';
+import LogSettings from './pages/LogSettings';
 import Diagnose from './pages/Diagnose';
 import KnowledgeGraph from './pages/KnowledgeGraph';
 import ModelHub from './pages/ModelHub';
@@ -24,9 +26,36 @@ import AssistantWidget from './components/AssistantWidget';
 
 const { Header, Content, Sider } = Layout;
 
-const menuItems = [
+interface MenuChildItem {
+  key: string;
+  label: string;
+  path: string;
+  permission?: string | null;
+  adminOnly?: boolean;
+}
+
+interface MenuItemConfig {
+  key: string;
+  icon: React.ReactNode;
+  label: string;
+  path?: string;
+  permission?: string | null;
+  adminOnly?: boolean;
+  children?: MenuChildItem[];
+}
+
+const menuItems: MenuItemConfig[] = [
   { key: '/', icon: <DashboardOutlined />, label: '仪表盘', path: '/', permission: null },
-  { key: '/logs', icon: <FileTextOutlined />, label: '日志列表', path: '/logs', permission: 'logs:view' },
+  {
+    key: '/logs-group',
+    icon: <FileTextOutlined />,
+    label: '日志中心',
+    permission: 'logs:view',
+    children: [
+      { key: '/logs', label: '日志查询', path: '/logs', permission: 'logs:view' },
+      { key: '/logs/settings', label: '日志配置', path: '/logs/settings', adminOnly: true },
+    ],
+  },
   { key: '/diagnose', icon: <BugOutlined />, label: '故障诊断', path: '/diagnose', permission: 'diagnose:view' },
   { key: '/knowledge', icon: <ApiOutlined />, label: '知识图谱', path: '/knowledge', permission: 'knowledge:view' },
   { key: '/models', icon: <SettingOutlined />, label: '模型管理', path: '/models', permission: null, adminOnly: true },
@@ -36,9 +65,20 @@ const AppContent = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
+  const [openKeys, setOpenKeys] = useState<string[]>([]);
   const { user, loading, logout, isAdmin, hasPermission } = useAuth();
   const isLoginPage = location.pathname === '/login';
   const isRegisterPage = location.pathname === '/register';
+
+  useEffect(() => {
+    if (collapsed) {
+      setOpenKeys([]);
+      return;
+    }
+    if (location.pathname.startsWith('/logs')) {
+      setOpenKeys(['/logs-group']);
+    }
+  }, [location.pathname, collapsed]);
 
   if (loading) {
     return (
@@ -56,10 +96,45 @@ const AppContent = () => {
     return <Register />;
   }
 
-  const filteredMenuItems = menuItems.filter(item => {
-    if (item.adminOnly && !isAdmin) return false;
-    if (item.permission && !hasPermission(item.permission) && !isAdmin) return false;
-    return true;
+  if (!user) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  const filteredMenuItems: MenuItemConfig[] = menuItems
+    .map((item) => {
+      const children = item.children;
+      if (children) {
+        const filteredChildren = children.filter((child) => {
+          if (child.adminOnly && !isAdmin) return false;
+          if (child.permission && !hasPermission(child.permission) && !isAdmin) return false;
+          return true;
+        });
+        if (filteredChildren.length === 0) return null;
+        return { ...item, children: filteredChildren };
+      }
+      if (item.adminOnly && !isAdmin) return null;
+      if (item.permission && !hasPermission(item.permission) && !isAdmin) return null;
+      return item;
+    })
+    .filter((item): item is MenuItemConfig => item !== null);
+
+  const menuRenderItems: Required<MenuProps>['items'] = filteredMenuItems.map((item) => {
+    if (item.children) {
+      return {
+        key: item.key,
+        icon: item.icon,
+        label: item.label,
+        children: item.children.map((child) => ({
+          key: child.key,
+          label: <Link to={child.path}>{child.label}</Link>,
+        })),
+      };
+    }
+    return {
+      key: item.key,
+      icon: item.icon,
+      label: <Link to={item.path || '/'}>{item.label}</Link>,
+    };
   });
 
   const userMenuItems = [
@@ -90,12 +165,10 @@ const AppContent = () => {
         <Menu
           theme="dark"
           selectedKeys={[location.pathname]}
+          openKeys={openKeys}
+          onOpenChange={(keys) => setOpenKeys(keys as string[])}
           mode="inline"
-          items={filteredMenuItems.map(item => ({
-            key: item.key,
-            icon: item.icon,
-            label: <Link to={item.path}>{item.label}</Link>,
-          }))}
+          items={menuRenderItems}
         />
       </Sider>
       <Layout>
@@ -135,6 +208,11 @@ const AppContent = () => {
               <Route path="/logs" element={
                 <PrivateRoute requiredPermission="logs:view">
                   <LogList />
+                </PrivateRoute>
+              } />
+              <Route path="/logs/settings" element={
+                <PrivateRoute requireAdmin>
+                  <LogSettings />
                 </PrivateRoute>
               } />
               <Route path="/diagnose" element={
