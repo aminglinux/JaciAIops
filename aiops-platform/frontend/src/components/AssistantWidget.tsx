@@ -13,7 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CloseOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
+import { DownOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
 import type { ChatHistoryMessage, ChatSessionSummary, LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
@@ -139,6 +139,27 @@ const markdownMessageStyle = `
     padding: 10px 12px;
     border-radius: 8px;
     overflow-x: auto;
+  }
+  @keyframes assistantBubbleFloat {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+  @keyframes assistantBubblePulse {
+    0% { box-shadow: 0 0 0 0 rgba(22, 119, 255, 0.32); }
+    70% { box-shadow: 0 0 0 12px rgba(22, 119, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(22, 119, 255, 0); }
+  }
+  .assistant-launcher-bubble {
+    animation: assistantBubbleFloat 3.2s ease-in-out infinite;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+  }
+  .assistant-launcher-bubble:hover {
+    transform: translateY(-4px) scale(1.03);
+    box-shadow: 0 18px 38px rgba(22, 119, 255, 0.34) !important;
+    filter: saturate(1.08);
+  }
+  .assistant-launcher-orb {
+    animation: assistantBubblePulse 2.4s ease-out infinite;
   }
 `;
 
@@ -508,44 +529,70 @@ const AssistantWidget = () => {
     <>
       <style>{markdownMessageStyle}</style>
       {!open && (
-        <div
+        <button
+          type="button"
+          className="assistant-launcher-bubble"
+          aria-label="打开AIOps助手"
+          onClick={() => setOpen(true)}
           style={{
             position: 'fixed',
             right: 24,
             bottom: 24,
             zIndex: 1100,
             display: 'flex',
-            flexDirection: 'column',
             alignItems: 'center',
-            gap: 8,
+            gap: 12,
+            minWidth: 188,
+            padding: '12px 16px 12px 12px',
+            border: 'none',
+            borderRadius: '22px 22px 6px 22px',
+            cursor: 'pointer',
+            color: '#fff',
+            background: 'linear-gradient(135deg, #1677ff 0%, #7c3aed 100%)',
+            boxShadow: '0 14px 32px rgba(22,119,255,0.3)',
           }}
         >
-          <Text
-            strong
+          <span
+            className="assistant-launcher-orb"
             style={{
-              padding: '4px 10px',
-              borderRadius: 999,
-              background: 'rgba(22, 119, 255, 0.12)',
-              color: '#1677ff',
-              boxShadow: '0 6px 18px rgba(22,119,255,0.12)',
+              width: 44,
+              height: 44,
+              borderRadius: 14,
+              background: 'rgba(255,255,255,0.18)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.22)',
+              flexShrink: 0,
             }}
           >
-            AIOps助手
-          </Text>
-          <Button
-            type="primary"
-            shape="circle"
-            size="large"
-            icon={<RobotOutlined style={{ fontSize: 24 }} />}
-            aria-label="打开AIOps助手"
-            onClick={() => setOpen(true)}
+            <RobotOutlined style={{ fontSize: 24 }} />
+          </span>
+          <span
             style={{
-              width: 60,
-              height: 60,
-              boxShadow: '0 12px 24px rgba(22,119,255,0.28)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-start',
+              lineHeight: 1.2,
+              textAlign: 'left',
+            }}
+          >
+            <span style={{ fontSize: 15, fontWeight: 700 }}>问问 AIOps</span>
+            <span style={{ marginTop: 3, fontSize: 11, opacity: 0.82 }}>智能问答 / 故障分析</span>
+          </span>
+          <span
+            style={{
+              position: 'absolute',
+              right: 18,
+              top: 10,
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: '#52c41a',
+              boxShadow: '0 0 0 3px rgba(82,196,26,0.18)',
             }}
           />
-        </div>
+        </button>
       )}
 
       {open && (
@@ -557,21 +604,79 @@ const AssistantWidget = () => {
                 cursor: dragging ? 'grabbing' : 'grab',
                 userSelect: 'none',
                 width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
               }}
             >
-              AIOps助手
+              <div
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 10,
+                  background: 'linear-gradient(135deg, #1677ff 0%, #7c3aed 100%)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 6px 18px rgba(22,119,255,0.28)',
+                  color: '#fff',
+                  fontWeight: 700,
+                  fontSize: 15,
+                  flexShrink: 0,
+                }}
+              >
+                AI
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
+                <span
+                  style={{
+                    fontSize: 17,
+                    fontWeight: 700,
+                    background: 'linear-gradient(135deg, #1677ff 0%, #7c3aed 100%)',
+                    WebkitBackgroundClip: 'text',
+                    WebkitTextFillColor: 'transparent',
+                  }}
+                >
+                  AIOps助手
+                </span>
+                <span style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>
+                  智能问答与运维分析
+                </span>
+              </div>
             </div>
           }
-          extra={<Button type="text" icon={<CloseOutlined />} onClick={() => setOpen(false)} />}
+          extra={
+            <Button
+              type="text"
+              onClick={() => setOpen(false)}
+              style={{
+                borderRadius: 999,
+                paddingInline: 10,
+                height: 32,
+                background: 'linear-gradient(135deg, #f5f5f5 0%, #e6f4ff 100%)',
+                border: '1px solid #d9d9d9',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 12, fontWeight: 500 }}>收起</span>
+              <DownOutlined style={{ fontSize: 11, color: '#1677ff' }} />
+            </Button>
+          }
           style={{
             position: 'fixed',
             right: position.right,
             bottom: position.bottom,
-            width: 920,
-            height: 860,
+            width: 'min(920px, calc(100vw - 32px))',
+            height: 'min(860px, calc(100vh - 32px))',
+            maxWidth: 'calc(100vw - 32px)',
+            maxHeight: 'calc(100vh - 32px)',
             zIndex: 1100,
             boxShadow: '0 12px 36px rgba(0,0,0,0.18)',
             borderRadius: 12,
+            overflow: 'hidden',
           }}
           bodyStyle={{
             padding: 0,
@@ -581,7 +686,8 @@ const AssistantWidget = () => {
         >
           <div
             style={{
-              width: 260,
+              width: 'clamp(220px, 28%, 260px)',
+              minWidth: 220,
               borderRight: '1px solid #f0f0f0',
               padding: 16,
               display: 'flex',
@@ -595,34 +701,40 @@ const AssistantWidget = () => {
               <Button size="small" onClick={handleNewSession}>新会话</Button>
             </div>
             <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
-              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                {sessions.map((session) => (
-                  <Button
-                    key={session.session_id}
-                    type={activeSessionId === session.session_id ? 'primary' : 'default'}
-                    onClick={() => setActiveSessionId(session.session_id)}
-                    style={{
-                      width: '100%',
-                      height: 'auto',
-                      minHeight: 56,
-                      textAlign: 'left',
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      justifyContent: 'flex-start',
-                      padding: '8px 10px',
-                    }}
-                  >
-                    <div style={{ width: '100%', overflow: 'hidden' }}>
-                      <div style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {session.title}
+              {sessions.length > 0 ? (
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  {sessions.map((session) => (
+                    <Button
+                      key={session.session_id}
+                      type={activeSessionId === session.session_id ? 'primary' : 'default'}
+                      onClick={() => setActiveSessionId(session.session_id)}
+                      style={{
+                        width: '100%',
+                        height: 'auto',
+                        minHeight: 56,
+                        textAlign: 'left',
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        justifyContent: 'flex-start',
+                        padding: '8px 10px',
+                      }}
+                    >
+                      <div style={{ width: '100%', overflow: 'hidden' }}>
+                        <div style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {session.title}
+                        </div>
+                        <div style={{ fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {session.last_message || '暂无消息'}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {session.last_message || '暂无消息'}
-                      </div>
-                    </div>
-                  </Button>
-                ))}
-              </Space>
+                    </Button>
+                  ))}
+                </Space>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  暂无历史会话，点击“新会话”后开始提问。
+                </Text>
+              )}
             </div>
           </div>
 

@@ -1363,14 +1363,26 @@ def _is_simple_chat_text(question: str) -> bool:
     if not normalized:
         return True
 
-    greeting_patterns = [
-        r"^(hi|hello|hey)\b",
-        r"^(你好|您好|嗨|哈喽)",
-        r"^(在吗|在不在)$",
-        r"(你是谁|你能做什么|帮助|help)$",
-        r"^(早上好|中午好|下午好|晚上好)$",
-    ]
-    return any(re.search(pattern, normalized) for pattern in greeting_patterns)
+    exact_simple_messages = {
+        "hi",
+        "hello",
+        "hey",
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "在吗",
+        "在不在",
+        "你是谁",
+        "你能做什么",
+        "帮助",
+        "help",
+        "早上好",
+        "中午好",
+        "下午好",
+        "晚上好",
+    }
+    return normalized in exact_simple_messages
 
 
 def _is_simple_chat(question: str, intent) -> bool:
@@ -1387,20 +1399,20 @@ def _is_simple_chat(question: str, intent) -> bool:
 
 def _build_simple_chat_response(question: str) -> str:
     normalized = question.strip().lower()
-    if any(token in normalized for token in ["你是谁", "你能做什么", "help", "帮助"]):
+    if normalized in {"你是谁", "你能做什么", "help", "帮助"}:
         return (
             "你好，我是 AIOps 智能问答助手。"
             "我更擅长回答运维相关问题，比如服务依赖、故障排查、数据库连接、日志分析和常见 SOP。"
             "你可以直接问我：`order-service 依赖哪些组件？` 或 `数据库连接池耗尽怎么排查？`"
         )
 
-    if any(token in normalized for token in ["你好", "您好", "hi", "hello", "hey", "嗨", "哈喽"]):
+    if normalized in {"你好", "您好", "hi", "hello", "hey", "嗨", "哈喽"}:
         return (
             "你好，很高兴为你服务。"
             "你可以直接描述一个运维问题、服务名或故障现象，我会尽量给出排查建议。"
         )
 
-    if any(token in normalized for token in ["早上好", "中午好", "下午好", "晚上好"]):
+    if normalized in {"早上好", "中午好", "下午好", "晚上好"}:
         return "你好，已在线。你可以告诉我具体的运维问题，我来帮你分析。"
 
     return "我已收到你的消息。若你想让我更准确回答，请尽量提供服务名、异常现象或具体问题。"
