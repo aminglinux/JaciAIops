@@ -14,6 +14,7 @@ import {
 
 import Dashboard from './pages/Dashboard';
 import LogList from './pages/LogList';
+import LogUpload from './pages/LogUpload';
 import LogSettings from './pages/LogSettings';
 import Diagnose from './pages/Diagnose';
 import KnowledgeGraph from './pages/KnowledgeGraph';
@@ -53,6 +54,7 @@ const menuItems: MenuItemConfig[] = [
     permission: 'logs:view',
     children: [
       { key: '/logs', label: '日志查询', path: '/logs', permission: 'logs:view' },
+      { key: '/logs/upload', label: '日志上传', path: '/logs/upload', permission: 'logs:view' },
       { key: '/logs/settings', label: '日志配置', path: '/logs/settings', adminOnly: true },
     ],
   },
@@ -208,6 +210,11 @@ const AppContent = () => {
               <Route path="/logs" element={
                 <PrivateRoute requiredPermission="logs:view">
                   <LogList />
+                </PrivateRoute>
+              } />
+              <Route path="/logs/upload" element={
+                <PrivateRoute requiredPermission="logs:view">
+                  <LogUpload />
                 </PrivateRoute>
               } />
               <Route path="/logs/settings" element={

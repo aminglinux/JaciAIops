@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Card, Input, Button, Tag, Steps, Spin, message, Typography, Collapse, Descriptions, Space } from 'antd';
 import { SendOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 
 import { agentApi } from '../services/api';
 import type { AgentTask } from '../types';
@@ -10,6 +11,7 @@ const { Title, Text, Paragraph } = Typography;
 const { Panel } = Collapse;
 
 const Diagnose = () => {
+  const navigate = useNavigate();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentTask, setCurrentTask] = useState<AgentTask | null>(null);
@@ -138,6 +140,18 @@ const Diagnose = () => {
     return colors[intent] || 'default';
   };
 
+  const openIncidentLogs = (sourceType: string = 'local') => {
+    const serviceName = currentTask?.intent_data?.entities?.service;
+    const params = new URLSearchParams();
+    params.set('incident', '1');
+    params.set('minutes', '30');
+    params.set('source', sourceType);
+    if (serviceName) {
+      params.set('service', serviceName);
+    }
+    navigate(`/logs?${params.toString()}`);
+  };
+
   return (
     <div>
       <Card title="故障诊断" style={{ marginBottom: 16 }}>
@@ -210,6 +224,13 @@ const Diagnose = () => {
                   <Descriptions.Item label="标准化查询">{currentTask.intent_data.normalized_query}</Descriptions.Item>
                 </Descriptions>
               )}
+              <div style={{ marginTop: 16 }}>
+                <Space wrap>
+                  <Button onClick={() => openIncidentLogs('local')}>查看本地故障日志</Button>
+                  <Button onClick={() => openIncidentLogs('elasticsearch')}>查看 Elasticsearch 故障日志</Button>
+                  <Button onClick={() => openIncidentLogs('loki')}>查看 Loki 故障日志</Button>
+                </Space>
+              </div>
             </Panel>
 
             {currentTask.ansible_playbook && (
@@ -342,6 +363,13 @@ const Diagnose = () => {
             <Panel header="观测分析报告" key="2">
               {currentTask.analysis_report && (
                 <div>
+                  <div style={{ marginBottom: 16 }}>
+                    <Space wrap>
+                      <Button onClick={() => openIncidentLogs('local')}>关联本地故障日志</Button>
+                      <Button onClick={() => openIncidentLogs('elasticsearch')}>关联 Elasticsearch 日志</Button>
+                      <Button onClick={() => openIncidentLogs('loki')}>关联 Loki 日志</Button>
+                    </Space>
+                  </div>
                   <Paragraph style={{ whiteSpace: 'pre-wrap' }}>
                     {currentTask.analysis_report.analysis_report}
                   </Paragraph>

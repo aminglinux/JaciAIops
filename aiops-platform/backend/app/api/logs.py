@@ -1,13 +1,17 @@
 import json
 import asyncio
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi import Depends
+import httpx
 
 from app.core.database import get_db, Log, Feedback
+from app.core.config import settings
+from app.api.auth import User, get_current_user, require_admin
+from app.services import log_source_config_manager
 from algorithm.anomaly_detector import AnomalyDetector
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -38,6 +42,277 @@ class StatsResponse(BaseModel):
     anomaly_rate: float
     level_distribution: dict
     top_patterns: List[dict]
+
+
+class UnifiedLogResponse(BaseModel):
+    id: str
+    timestamp: datetime
+    level: str
+    content: str
+    source: str
+    source_type: str = "local"
+    service: Optional[str] = None
+    labels: Optional[Dict[str, str]] = None
+    is_anomaly: bool
+    anomaly_score: Optional[float]
+    user_feedback: Optional[bool]
+    raw: Optional[Dict[str, Any]] = None
+
+
+class LogSourceConfigPayload(BaseModel):
+    elasticsearch_enabled: bool = True
+    elasticsearch_url: str
+    elasticsearch_index_pattern: str = "logstash-*"
+    loki_enabled: bool = True
+    loki_url: str
+
+
+INCIDENT_KEYWORDS = ["error", "exception", "fail", "failed", "timeout", "refused", "panic", "oom", "fatal"]
+
+
+def _normalize_level(content: str, level: Optional[str] = None) -> str:
+    normalized = (level or "").upper().strip()
+    if normalized in {"ERROR", "WARN", "INFO", "DEBUG"}:
+        return normalized
+
+    content_lower = (content or "").lower()
+    if "error" in content_lower:
+        return "ERROR"
+    if "warn" in content_lower:
+        return "WARN"
+    if "debug" in content_lower:
+        return "DEBUG"
+    return "INFO"
+
+
+def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    normalized = normalized.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized)
+
+
+def _to_iso_timestamp(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _build_local_log_response(log: Log) -> UnifiedLogResponse:
+    return UnifiedLogResponse(
+        id=str(log.id),
+        timestamp=log.timestamp,
+        level=log.level,
+        content=log.content,
+        source=log.source,
+        source_type="local",
+        service=None,
+        labels=None,
+        is_anomaly=log.is_anomaly,
+        anomaly_score=log.anomaly_score,
+        user_feedback=log.user_feedback,
+        raw=None,
+    )
+
+
+async def _query_elasticsearch_logs(
+    keyword: Optional[str],
+    level: Optional[str],
+    levels: Optional[List[str]],
+    service: Optional[str],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    limit: int,
+    incident_only: bool,
+) -> List[UnifiedLogResponse]:
+    source_config = log_source_config_manager.get_effective_config()
+    if not source_config["elasticsearchEnabled"]:
+        raise ValueError("Elasticsearch 日志源未启用")
+    base_url = str(source_config.get("elasticsearchUrl", "http://localhost:9200")).rstrip("/")
+    index_pattern = str(source_config.get("elasticsearchIndexPattern", "logstash-*"))
+
+    must_clauses: List[Dict[str, Any]] = []
+    if keyword:
+        must_clauses.append(
+            {
+                "simple_query_string": {
+                    "query": keyword,
+                    "fields": ["message", "content", "log", "service", "kubernetes.container_name"],
+                    "default_operator": "and",
+                }
+            }
+        )
+    normalized_levels = [item for item in (levels or []) if item]
+    if level and level not in normalized_levels:
+        normalized_levels.append(level)
+    if normalized_levels:
+        must_clauses.append({"terms": {"level.keyword": normalized_levels}})
+    if service:
+        must_clauses.append(
+            {
+                "bool": {
+                    "should": [
+                        {"term": {"service.keyword": service}},
+                        {"term": {"service_name.keyword": service}},
+                        {"term": {"kubernetes.container_name.keyword": service}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        )
+
+    time_range: Dict[str, str] = {}
+    if start_time:
+        time_range["gte"] = _to_iso_timestamp(start_time) or ""
+    if end_time:
+        time_range["lte"] = _to_iso_timestamp(end_time) or ""
+    if time_range:
+        must_clauses.append({"range": {"@timestamp": time_range}})
+    if incident_only:
+        should_clauses = [{"term": {"level.keyword": "ERROR"}}, {"term": {"level.keyword": "WARN"}}]
+        for incident_keyword in INCIDENT_KEYWORDS:
+            should_clauses.append(
+                {
+                    "simple_query_string": {
+                        "query": incident_keyword,
+                        "fields": ["message", "content", "log"],
+                    }
+                }
+            )
+        must_clauses.append({"bool": {"should": should_clauses, "minimum_should_match": 1}})
+
+    payload = {
+        "size": limit,
+        "sort": [{"@timestamp": {"order": "desc"}}],
+        "query": {
+            "bool": {
+                "must": must_clauses or [{"match_all": {}}],
+            }
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(f"{base_url}/{index_pattern}/_search", json=payload)
+        response.raise_for_status()
+        hits = response.json().get("hits", {}).get("hits", [])
+
+    results: List[UnifiedLogResponse] = []
+    for hit in hits:
+        source_doc = hit.get("_source", {})
+        content = str(
+            source_doc.get("message")
+            or source_doc.get("content")
+            or source_doc.get("log")
+            or json.dumps(source_doc, ensure_ascii=False)
+        )
+        normalized_level = _normalize_level(content, source_doc.get("level"))
+        anomaly, score = detector.detect(content)
+        timestamp = _parse_datetime(str(source_doc.get("@timestamp") or source_doc.get("timestamp") or datetime.utcnow().isoformat()))
+        if not timestamp:
+            timestamp = datetime.utcnow()
+        service_name = source_doc.get("service") or source_doc.get("service_name") or source_doc.get("kubernetes", {}).get("container_name")
+
+        results.append(
+            UnifiedLogResponse(
+                id=str(hit.get("_id") or f"es-{len(results)}"),
+                timestamp=timestamp,
+                level=normalized_level,
+                content=content[:4000],
+                source=str(hit.get("_index") or "elasticsearch"),
+                source_type="elasticsearch",
+                service=str(service_name) if service_name else None,
+                labels=None,
+                is_anomaly=anomaly,
+                anomaly_score=score,
+                user_feedback=None,
+                raw=source_doc,
+            )
+        )
+    return results
+
+
+async def _query_loki_logs(
+    keyword: Optional[str],
+    level: Optional[str],
+    levels: Optional[List[str]],
+    service: Optional[str],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    limit: int,
+    incident_only: bool,
+) -> List[UnifiedLogResponse]:
+    source_config = log_source_config_manager.get_effective_config()
+    if not source_config["lokiEnabled"]:
+        raise ValueError("Loki 日志源未启用")
+    base_url = str(source_config.get("lokiUrl", "http://localhost:3100")).rstrip("/")
+
+    selector_parts: List[str] = []
+    if service:
+        selector_parts.append(f'service="{service}"')
+    stream_selector = "{" + ",".join(selector_parts) + "}" if selector_parts else "{job=~\".+\"}"
+
+    pipeline_parts: List[str] = []
+    if keyword:
+        pipeline_parts.append(f'|= "{keyword}"')
+    normalized_levels = [item for item in (levels or []) if item]
+    if level and level not in normalized_levels:
+        normalized_levels.append(level)
+    if normalized_levels:
+        level_pattern = "|".join(normalized_levels)
+        pipeline_parts.append(f'|~ "(?i)({level_pattern})"')
+    if incident_only:
+        keyword_pattern = "|".join(INCIDENT_KEYWORDS)
+        pipeline_parts.append(f'|~ "(?i)({keyword_pattern}|error|warn)"')
+    query = f"{stream_selector} {' '.join(pipeline_parts)}".strip()
+
+    params: Dict[str, Any] = {
+        "query": query,
+        "limit": limit,
+        "direction": "BACKWARD",
+    }
+    if start_time:
+        params["start"] = str(int(start_time.timestamp() * 1_000_000_000))
+    if end_time:
+        params["end"] = str(int(end_time.timestamp() * 1_000_000_000))
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(f"{base_url}/loki/api/v1/query_range", params=params)
+        response.raise_for_status()
+        streams = response.json().get("data", {}).get("result", [])
+
+    results: List[UnifiedLogResponse] = []
+    for stream in streams:
+        labels = {key: str(value) for key, value in stream.get("stream", {}).items()}
+        for value in stream.get("values", []):
+            if len(value) < 2:
+                continue
+            timestamp_ns, content = value[0], str(value[1])
+            normalized_level = _normalize_level(content, labels.get("level"))
+            anomaly, score = detector.detect(content)
+            try:
+                timestamp = datetime.fromtimestamp(int(timestamp_ns) / 1_000_000_000)
+            except Exception:
+                timestamp = datetime.utcnow()
+            results.append(
+                UnifiedLogResponse(
+                    id=f"loki-{timestamp_ns}-{len(results)}",
+                    timestamp=timestamp,
+                    level=normalized_level,
+                    content=content[:4000],
+                    source=labels.get("job") or labels.get("app") or "loki",
+                    source_type="loki",
+                    service=labels.get("service") or labels.get("app"),
+                    labels=labels,
+                    is_anomaly=anomaly,
+                    anomaly_score=score,
+                    user_feedback=None,
+                    raw={"stream": labels},
+                )
+            )
+
+    results.sort(key=lambda item: item.timestamp, reverse=True)
+    return results[:limit]
 
 @router.post("/upload")
 async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -135,10 +410,93 @@ async def get_logs(
             source=log.source,
             is_anomaly=log.is_anomaly,
             anomaly_score=log.anomaly_score,
-            user_feedback=log.user_feedback
+            user_feedback=log.user_feedback,
         )
         for log in logs
     ]
+
+
+@router.get("/query", response_model=List[UnifiedLogResponse])
+async def query_logs(
+    source_type: str = "local",
+    keyword: Optional[str] = None,
+    level: Optional[str] = None,
+    levels: Optional[str] = None,
+    service: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    incident_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    normalized_source = (source_type or "local").strip().lower()
+    safe_limit = min(max(limit, 1), 200)
+    parsed_start = _parse_datetime(start_time)
+    parsed_end = _parse_datetime(end_time)
+    normalized_levels = [item.strip().upper() for item in (levels or "").split(",") if item.strip()]
+    if incident_only and not normalized_levels:
+        normalized_levels = ["ERROR", "WARN"]
+
+    if normalized_source == "local":
+        query = db.query(Log)
+        if normalized_levels:
+            query = query.filter(Log.level.in_(normalized_levels))
+        elif level:
+            query = query.filter(Log.level == level)
+        if keyword:
+            query = query.filter(Log.content.contains(keyword))
+        if service:
+            query = query.filter(Log.source.contains(service))
+        if parsed_start:
+            query = query.filter(Log.timestamp >= parsed_start)
+        if parsed_end:
+            query = query.filter(Log.timestamp <= parsed_end)
+        if incident_only:
+            incident_filters = [Log.level.in_(["ERROR", "WARN"])]
+            for incident_keyword in INCIDENT_KEYWORDS:
+                incident_filters.append(Log.content.ilike(f"%{incident_keyword}%"))
+            from sqlalchemy import or_
+            query = query.filter(or_(*incident_filters))
+
+        logs = query.order_by(Log.timestamp.desc()).offset(offset).limit(safe_limit).all()
+        return [_build_local_log_response(log) for log in logs]
+
+    if normalized_source == "elasticsearch":
+        try:
+            return await _query_elasticsearch_logs(keyword, level, normalized_levels, service, parsed_start, parsed_end, safe_limit, incident_only)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"查询 Elasticsearch 日志失败: {exc}") from exc
+
+    if normalized_source == "loki":
+        try:
+            return await _query_loki_logs(keyword, level, normalized_levels, service, parsed_start, parsed_end, safe_limit, incident_only)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"查询 Loki 日志失败: {exc}") from exc
+
+    raise HTTPException(status_code=400, detail="不支持的日志来源")
+
+
+@router.get("/config", response_model=dict)
+def get_log_source_config(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {
+        "code": 200,
+        "message": "success",
+        "data": log_source_config_manager.get_config(db),
+    }
+
+
+@router.put("/config", response_model=dict)
+def update_log_source_config(
+    payload: LogSourceConfigPayload,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        result = log_source_config_manager.update_config(db, payload.model_dump(), current_user.username)
+        return {"code": 200, "message": "更新成功", "data": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.post("/{log_id}/feedback")
 async def submit_feedback(log_id: int, feedback: FeedbackRequest, db: Session = Depends(get_db)):

@@ -1,20 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Row, Col, Card, Statistic, Table, Tag, Spin, message, Upload, Button, Space } from 'antd';
-import { UploadOutlined, PlayCircleOutlined, StopOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Row, Col, Card, Statistic, Table, Tag, Spin, message } from 'antd';
 import ReactECharts from 'echarts-for-react';
-import type { UploadProps } from 'antd';
 import dayjs from 'dayjs';
 
-import { logsApi, wsUrl } from '../services/api';
+import { logsApi } from '../services/api';
 import type { Log, LogStats } from '../types';
 
 const Dashboard = () => {
   const [stats, setStats] = useState<LogStats | null>(null);
   const [logs, setLogs] = useState<Log[]>([]);
   const [loading, setLoading] = useState(false);
-  const [simulating, setSimulating] = useState(false);
-  const [ws, setWs] = useState<WebSocket | null>(null);
-  const [trendData, setTrendData] = useState<{ time: string; count: number }[]>([]);
+  const [trendData] = useState<{ time: string; count: number }[]>([]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -35,64 +31,6 @@ const Dashboard = () => {
   useEffect(() => {
     fetchData();
   }, []);
-
-  const uploadProps: UploadProps = {
-    name: 'file',
-    accept: '.log,.txt',
-    showUploadList: false,
-    beforeUpload: async (file) => {
-      try {
-        const result = await logsApi.uploadFile(file);
-        message.success(result.message);
-        fetchData();
-      } catch (error) {
-        message.error('上传失败');
-      }
-      return false;
-    },
-  };
-
-  const startSimulation = () => {
-    const websocket = new WebSocket(wsUrl);
-    
-    websocket.onopen = () => {
-      websocket.send('start');
-      setSimulating(true);
-      message.success('开始模拟日志流');
-    };
-
-    websocket.onmessage = (event) => {
-      const log = JSON.parse(event.data);
-      setLogs(prev => [log, ...prev].slice(0, 100));
-      
-      const now = dayjs().format('HH:mm:ss');
-      setTrendData(prev => {
-        const newData = [...prev, { time: now, count: 1 }];
-        return newData.slice(-60);
-      });
-    };
-
-    websocket.onerror = () => {
-      message.error('WebSocket连接失败');
-      setSimulating(false);
-    };
-
-    websocket.onclose = () => {
-      setSimulating(false);
-    };
-
-    setWs(websocket);
-  };
-
-  const stopSimulation = () => {
-    if (ws) {
-      ws.send('stop');
-      ws.close();
-      setWs(null);
-    }
-    setSimulating(false);
-    message.info('停止模拟');
-  };
 
   const columns = [
     {
@@ -170,12 +108,12 @@ const Dashboard = () => {
   return (
     <div>
       <Row gutter={[16, 16]}>
-        <Col span={6}>
+        <Col span={8}>
           <Card>
             <Statistic title="今日日志总数" value={stats?.total_logs || 0} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={8}>
           <Card>
             <Statistic 
               title="异常数量" 
@@ -184,32 +122,13 @@ const Dashboard = () => {
             />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={8}>
           <Card>
             <Statistic 
               title="异常率" 
               value={stats ? (stats.anomaly_rate * 100).toFixed(2) : 0} 
               suffix="%" 
             />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Space direction="vertical" style={{ width: '100%' }}>
-              <Upload {...uploadProps}>
-                <Button icon={<UploadOutlined />} block>上传日志文件</Button>
-              </Upload>
-              <Button
-                type={simulating ? 'default' : 'primary'}
-                icon={simulating ? <StopOutlined /> : <PlayCircleOutlined />}
-                onClick={simulating ? stopSimulation : startSimulation}
-                danger={simulating}
-                block
-              >
-                {simulating ? '停止模拟' : '开始模拟'}
-              </Button>
-              <Button icon={<ReloadOutlined />} onClick={fetchData} block>刷新数据</Button>
-            </Space>
           </Card>
         </Col>
       </Row>
