@@ -8,6 +8,12 @@ import type {
   AgentTask,
   DiagnoseRequest,
   DiagnoseResponse,
+  AlertAnalyzeRequest,
+  AlertAnalysisResult,
+  AlertEventSummary,
+  AlertEventDetail,
+  AlertWebhookSecurityConfig,
+  AlertWebhookSecurityConfigPayload,
   ApiResponse,
   LoginParams,
   LoginResult,
@@ -159,6 +165,33 @@ export const agentApi = {
   getHistory: async (limit: number = 10): Promise<{ tasks: Array<{ task_id: string; user_input: string; status: string; created_at: string }> }> => {
     const response = await api.get('/agent/history', { params: { limit } });
     return response.data;
+  },
+};
+
+export const alertsApi = {
+  analyze: async (request: AlertAnalyzeRequest): Promise<AlertAnalysisResult> => {
+    const response = await api.post<AlertAnalysisResult>('/alerts/analyze', request);
+    return response.data;
+  },
+
+  listEvents: async (params?: { limit?: number; source?: string; status?: string }): Promise<{ events: AlertEventSummary[] }> => {
+    const response = await api.get<{ events: AlertEventSummary[] }>('/alerts/events', { params });
+    return response.data;
+  },
+
+  getEvent: async (eventId: number): Promise<AlertEventDetail> => {
+    const response = await api.get<AlertEventDetail>(`/alerts/events/${eventId}`);
+    return response.data;
+  },
+
+  getSecurityConfig: async (): Promise<AlertWebhookSecurityConfig> => {
+    const response = await api.get<ApiResponse<AlertWebhookSecurityConfig>>('/alerts/security-config');
+    return response.data.data;
+  },
+
+  updateSecurityConfig: async (payload: AlertWebhookSecurityConfigPayload): Promise<AlertWebhookSecurityConfig> => {
+    const response = await api.put<ApiResponse<AlertWebhookSecurityConfig>>('/alerts/security-config', payload);
+    return response.data.data;
   },
 };
 

@@ -3,8 +3,9 @@ import shlex
 import traceback
 import os
 import subprocess
+import re
 from typing import Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .intent_parse import IntentParseAgent
 from .knowledge import KnowledgeExpertAgent
@@ -40,6 +41,11 @@ class MultiAgentOrchestrator:
         self.tool_registry = ToolRegistry(self.file_manager)
         self.master_agent = MasterAgent(self.tool_registry)
         self.action_agent = ActionExecuteAgent()
+        self.alert_log_keywords = [
+            "error", "exception", "timeout", "timed out", "refused",
+            "oom", "out of memory", "panic", "failed", "unavailable",
+            "connection reset", "reset by peer", "deadlock", "slow query",
+        ]
     
     async def process_query(self, user_query: str) -> Dict[str, Any]:
         """
@@ -66,6 +72,11 @@ class MultiAgentOrchestrator:
             result["stages"]["intent_parsing"] = await self._stage_intent_parsing(user_query)
             
             intent_data = result["stages"]["intent_parsing"]
+            extra_context = None
+
+            if self._is_alert_rca_query(user_query):
+                extra_context = await self._stage_alert_rca_prefetch(user_query, intent_data)
+                result["stages"]["alert_prefetch"] = extra_context
             
             matched_skills = self.skill_manager.search_relevant_skills(user_query, intent_data)
             skills_content = self.skill_manager.get_relevant_skills_content(matched_skills)
@@ -81,6 +92,7 @@ class MultiAgentOrchestrator:
             dynamic_result = await self.master_agent.plan_and_execute(
                 user_query=user_query,
                 intent_data=intent_data,
+                extra_context=extra_context,
                 max_iterations=40
             )
             
@@ -108,6 +120,12 @@ class MultiAgentOrchestrator:
                     "decision": "MANUAL_INTERVENTION",
                     "reason": dynamic_result.get("message", "动态执行未完成")
                 }
+
+            if extra_context:
+                result["final_decision"] = self._merge_alert_prefetch_into_final_decision(
+                    result.get("final_decision", {}) or {},
+                    extra_context,
+                )
             
         except Exception as e:
             error_trace = traceback.format_exc()
@@ -130,6 +148,378 @@ class MultiAgentOrchestrator:
         result["saved_to"] = full_result_file
         
         return result
+
+    def _merge_alert_prefetch_into_final_decision(
+        self,
+        final_decision: Dict[str, Any],
+        extra_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged_decision = dict(final_decision or {})
+        prefetch_log = dict(extra_context.get("log_evidence_prefetch") or {})
+        if not prefetch_log:
+            return merged_decision
+
+        existing_log_evidence = merged_decision.get("log_evidence")
+        if not isinstance(existing_log_evidence, dict):
+            existing_log_evidence = {}
+
+        merged_log_evidence = {
+            "status": prefetch_log.get("status", "not_found"),
+            "summary": prefetch_log.get("message")
+            or (
+                f"日志预采集状态为 {prefetch_log.get('status', 'not_found')}，"
+                f"匹配分数 {prefetch_log.get('match_score', 0)}。"
+            ),
+            "top_patterns": prefetch_log.get("matched_keywords", []),
+            "sample_logs": prefetch_log.get("sample_messages", []),
+            "suspected_component": extra_context.get("alert_context", {}).get("service", ""),
+            "confidence": "HIGH" if prefetch_log.get("status") == "matched" else "MEDIUM" if prefetch_log.get("status") == "weak_matched" else "LOW",
+            "match_score": prefetch_log.get("match_score", 0),
+            "matched_fields": prefetch_log.get("matched_fields", []),
+            "source_type": prefetch_log.get("source_type"),
+            **existing_log_evidence,
+        }
+
+        if not existing_log_evidence:
+            merged_decision["log_evidence"] = merged_log_evidence
+        else:
+            merged_decision["log_evidence"] = {
+                **merged_log_evidence,
+                **existing_log_evidence,
+                "status": existing_log_evidence.get("status") or merged_log_evidence["status"],
+                "summary": existing_log_evidence.get("summary") or merged_log_evidence["summary"],
+                "top_patterns": existing_log_evidence.get("top_patterns") or merged_log_evidence["top_patterns"],
+                "sample_logs": existing_log_evidence.get("sample_logs") or merged_log_evidence["sample_logs"],
+                "suspected_component": existing_log_evidence.get("suspected_component") or merged_log_evidence["suspected_component"],
+                "confidence": existing_log_evidence.get("confidence") or merged_log_evidence["confidence"],
+            }
+
+        if not merged_decision.get("affected_services"):
+            alert_service = extra_context.get("alert_context", {}).get("service")
+            related_services = extra_context.get("knowledge_context", {}).get("related_services", [])
+            merged_decision["affected_services"] = [item for item in [alert_service, *related_services] if item]
+
+        if not merged_decision.get("evidence_chain"):
+            evidence_chain = []
+            knowledge_report = extra_context.get("knowledge_context", {}).get("knowledge_report")
+            if knowledge_report:
+                evidence_chain.append(f"KG: {knowledge_report[:160]}")
+            metrics_evidence = extra_context.get("metrics_evidence", {})
+            if metrics_evidence.get("success"):
+                evidence_chain.append(f"Metrics: 来自 {metrics_evidence.get('source_type', 'unknown')} 的指标预采集成功")
+            evidence_chain.append(f"Logs: {merged_decision['log_evidence'].get('summary', '无日志证据')}")
+            trace_evidence = extra_context.get("trace_evidence", {})
+            if trace_evidence.get("success"):
+                evidence_chain.append(f"Traces: 来自 {trace_evidence.get('source_type', 'unknown')} 的链路预采集成功")
+            merged_decision["evidence_chain"] = evidence_chain
+
+        return merged_decision
+
+    def _is_alert_rca_query(self, user_query: str) -> bool:
+        return "[ALERT_RCA]" in user_query
+
+    def _extract_alert_context(self, user_query: str, intent_data: Dict[str, Any]) -> Dict[str, Any]:
+        def _match_field(field_name: str) -> str:
+            pattern = rf"{field_name}:\s*(.+)"
+            match = re.search(pattern, user_query)
+            return match.group(1).strip() if match else ""
+
+        entities = intent_data.get("entities", {}) if isinstance(intent_data, dict) else {}
+        services = entities.get("services", []) or []
+        service_from_intent = ""
+        if services:
+            first_service = services[0]
+            if isinstance(first_service, dict):
+                service_from_intent = first_service.get("normalized") or first_service.get("value") or ""
+            else:
+                service_from_intent = str(first_service)
+
+        metrics = entities.get("metrics", []) or []
+        metric_from_intent = ""
+        if metrics:
+            first_metric = metrics[0]
+            if isinstance(first_metric, dict):
+                metric_from_intent = first_metric.get("normalized") or first_metric.get("value") or ""
+            else:
+                metric_from_intent = str(first_metric)
+
+        alert_time_raw = _match_field("发生时间")
+        lookback_match = re.search(r"回看窗口:\s*告警时间前后\s*(\d+)\s*分钟", user_query)
+        lookback_minutes = int(lookback_match.group(1)) if lookback_match else 15
+
+        return {
+            "alert_name": _match_field("告警名称"),
+            "severity": _match_field("告警级别") or "warning",
+            "service": _match_field("服务") or service_from_intent or "unknown",
+            "instance": _match_field("实例/IP/Pod"),
+            "metric_name": _match_field("指标") or metric_from_intent,
+            "current_value": _match_field("当前值"),
+            "threshold": _match_field("阈值"),
+            "alert_time": alert_time_raw,
+            "lookback_minutes": lookback_minutes,
+            "description": _match_field("告警描述"),
+        }
+
+    def _build_alert_time_range(self, alert_time: str, lookback_minutes: int) -> List[str]:
+        try:
+            normalized = alert_time.replace("Z", "+00:00")
+            alert_dt = datetime.fromisoformat(normalized)
+        except Exception:
+            alert_dt = datetime.utcnow()
+
+        start_dt = alert_dt - timedelta(minutes=max(1, lookback_minutes))
+        end_dt = alert_dt + timedelta(minutes=max(1, lookback_minutes))
+        return [
+            start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        ]
+
+    async def _stage_alert_rca_prefetch(self, user_query: str, intent_data: Dict[str, Any]) -> Dict[str, Any]:
+        alert_context = self._extract_alert_context(user_query, intent_data)
+        time_range = self._build_alert_time_range(
+            alert_context.get("alert_time", ""),
+            int(alert_context.get("lookback_minutes", 15) or 15),
+        )
+        service = alert_context.get("service", "unknown")
+        instance = alert_context.get("instance") or ""
+
+        data_sources_info = await self.tool_registry._list_data_sources()
+        available_sources = {
+            item.get("name"): item.get("available", False)
+            for item in data_sources_info.get("data_sources", [])
+            if isinstance(item, dict)
+        }
+
+        symptoms = intent_data.get("entities", {}).get("symptoms", []) if isinstance(intent_data, dict) else []
+        knowledge_context = await self._stage_knowledge_query(service, symptoms, intent_data.get("entities", {}))
+
+        metrics_data = await self._prefetch_alert_metrics(service, available_sources)
+        logs_data = await self._prefetch_alert_logs(alert_context, time_range, available_sources)
+        traces_data = await self._prefetch_alert_traces(service, available_sources)
+
+        return {
+            "mode": "alert_prefetch_pipeline",
+            "alert_context": alert_context,
+            "time_range": time_range,
+            "available_sources": available_sources,
+            "knowledge_context": knowledge_context,
+            "metrics_evidence": metrics_data,
+            "log_evidence_prefetch": logs_data,
+            "trace_evidence": traces_data,
+        }
+
+    async def _prefetch_alert_metrics(self, service: str, available_sources: Dict[str, bool]) -> Dict[str, Any]:
+        query = "up"
+        if service and service != "unknown":
+            query = f'up{{job=~".*{service}.*"}}'
+
+        for source_name in ["prometheus", "aliyun_monitor"]:
+            if not available_sources.get(source_name):
+                continue
+            result = await self.tool_registry._load_data_from_source(
+                source_name=source_name,
+                data_type="metrics",
+                filters={"service": service},
+                query=query,
+            )
+            if result.get("success"):
+                return result
+
+        return {
+            "success": False,
+            "status": "not_available",
+            "message": "未获取到可用 metrics 数据源或数据",
+        }
+
+    async def _prefetch_alert_logs(
+        self,
+        alert_context: Dict[str, Any],
+        time_range: List[str],
+        available_sources: Dict[str, bool],
+    ) -> Dict[str, Any]:
+        service = alert_context.get("service", "")
+        instance = alert_context.get("instance", "")
+        metric_name = alert_context.get("metric_name", "")
+        description = alert_context.get("description", "")
+
+        elastic_query = {
+            "size": 20,
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "query": {
+                "bool": {
+                    "must": [
+                        {"range": {"@timestamp": {"gte": time_range[0], "lte": time_range[1]}}},
+                        {
+                            "bool": {
+                                "should": [
+                                    {"term": {"service.keyword": service}},
+                                    {"term": {"service_name.keyword": service}},
+                                    {"term": {"instance.keyword": instance}},
+                                    {"match": {"message": description or metric_name or service}},
+                                ],
+                                "minimum_should_match": 1,
+                            }
+                        },
+                    ]
+                }
+            },
+        }
+        loki_query = f'{{service="{service}"}} |= "error"'
+        if description:
+            loki_query = f'{{service="{service}"}} |= "{description.split(" ")[0]}"'
+
+        for source_name in ["loki", "elasticsearch"]:
+            if not available_sources.get(source_name):
+                continue
+            kwargs: Dict[str, Any] = {}
+            if source_name == "loki":
+                kwargs["query"] = loki_query
+            else:
+                kwargs["query"] = elastic_query
+
+            result = await self.tool_registry._load_data_from_source(
+                source_name=source_name,
+                data_type="logs",
+                time_range=time_range,
+                filters={"service": service, "instance": instance},
+                **kwargs,
+            )
+            if result.get("success"):
+                log_assessment = self._assess_log_relevance(result, alert_context)
+                return {
+                    **result,
+                    **log_assessment,
+                }
+
+        return {
+            "success": False,
+            "status": "not_found",
+            "message": "未从 Loki/Elasticsearch 预采集到相关日志",
+        }
+
+    def _has_meaningful_logs(self, result: Dict[str, Any]) -> bool:
+        if result.get("total_logs", 0) > 0:
+            return True
+        if result.get("logs"):
+            return True
+        if result.get("result"):
+            return True
+        return False
+
+    def _extract_log_text_samples(self, result: Dict[str, Any]) -> List[str]:
+        samples: List[str] = []
+
+        for log_item in result.get("logs", [])[:10]:
+            if isinstance(log_item, dict):
+                message = (
+                    log_item.get("message")
+                    or log_item.get("content")
+                    or log_item.get("log")
+                    or json.dumps(log_item, ensure_ascii=False)
+                )
+                samples.append(str(message))
+
+        for stream in result.get("result", [])[:10]:
+            if not isinstance(stream, dict):
+                continue
+            values = stream.get("values", []) or []
+            for value in values[:3]:
+                if isinstance(value, list) and len(value) >= 2:
+                    samples.append(str(value[1]))
+
+        for log_item in result.get("sample_logs", [])[:10]:
+            if isinstance(log_item, dict):
+                samples.append(str(log_item.get("message") or log_item))
+            else:
+                samples.append(str(log_item))
+
+        return [sample for sample in samples if sample.strip()]
+
+    def _assess_log_relevance(self, result: Dict[str, Any], alert_context: Dict[str, Any]) -> Dict[str, Any]:
+        samples = self._extract_log_text_samples(result)
+        if not samples and not self._has_meaningful_logs(result):
+            return {
+                "status": "not_found",
+                "match_score": 0,
+                "matched_keywords": [],
+                "matched_fields": [],
+                "sample_messages": [],
+            }
+
+        service = str(alert_context.get("service", "") or "").lower()
+        instance = str(alert_context.get("instance", "") or "").lower()
+        metric_name = str(alert_context.get("metric_name", "") or "").lower()
+        description = str(alert_context.get("description", "") or "").lower()
+
+        score = 0
+        matched_keywords: List[str] = []
+        matched_fields: List[str] = []
+
+        for sample in samples:
+            sample_lower = sample.lower()
+
+            for keyword in self.alert_log_keywords:
+                if keyword in sample_lower and keyword not in matched_keywords:
+                    matched_keywords.append(keyword)
+                    score += 2
+
+            if service and service in sample_lower:
+                score += 2
+                if "service" not in matched_fields:
+                    matched_fields.append("service")
+            if instance and instance in sample_lower:
+                score += 2
+                if "instance" not in matched_fields:
+                    matched_fields.append("instance")
+            if metric_name and metric_name in sample_lower:
+                score += 1
+                if "metric" not in matched_fields:
+                    matched_fields.append("metric")
+
+            description_tokens = [token for token in re.split(r"[\s,;|]+", description) if len(token) >= 4][:5]
+            for token in description_tokens:
+                if token in sample_lower:
+                    score += 1
+                    if "description" not in matched_fields:
+                        matched_fields.append("description")
+                    break
+
+        if score >= 6:
+            status = "matched"
+        elif score >= 2:
+            status = "weak_matched"
+        else:
+            status = "not_found"
+
+        return {
+            "status": status,
+            "match_score": score,
+            "matched_keywords": matched_keywords[:10],
+            "matched_fields": matched_fields,
+            "sample_messages": samples[:5],
+        }
+
+    async def _prefetch_alert_traces(self, service: str, available_sources: Dict[str, bool]) -> Dict[str, Any]:
+        if not available_sources.get("jaeger"):
+            return {
+                "success": False,
+                "status": "not_available",
+                "message": "Jaeger 不可用，未预采集到 traces",
+            }
+
+        result = await self.tool_registry._load_data_from_source(
+            source_name="jaeger",
+            data_type="traces",
+            service=service,
+            filters={"service": service},
+        )
+        if result.get("success"):
+            return result
+        return {
+            "success": False,
+            "status": "not_available",
+            "message": result.get("error", "未预采集到 traces"),
+        }
     
     async def process_query_legacy(self, user_query: str) -> Dict[str, Any]:
         """

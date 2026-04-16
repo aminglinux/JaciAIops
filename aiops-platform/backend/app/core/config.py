@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     SSH_KEY_PATH: str = os.path.expanduser("~/.ssh/id_rsa")
     SSH_STRICT_HOST_KEY_CHECK: bool = False
     SSH_CONNECT_TIMEOUT: int = 10
+
+    ALERT_WEBHOOK_IP_WHITELIST: str = ""
+    ALERT_WEBHOOK_TRUST_PROXY_HEADERS: bool = False
     
     ALIYUN_ACCESS_KEY_ID: str = ""
     ALIYUN_ACCESS_KEY_SECRET: str = ""
@@ -158,6 +161,8 @@ def validate_security_settings():
         warnings_list.append("SSH_USER 未设置，远程命令执行将不可用，请在 .env 中配置")
     if not settings.SSH_STRICT_HOST_KEY_CHECK:
         warnings_list.append("SSH_STRICT_HOST_KEY_CHECK=False，生产环境建议启用主机密钥验证")
+    if settings.ALERT_WEBHOOK_TRUST_PROXY_HEADERS and not settings.ALERT_WEBHOOK_IP_WHITELIST:
+        warnings_list.append("ALERT_WEBHOOK_TRUST_PROXY_HEADERS=True 但未配置 ALERT_WEBHOOK_IP_WHITELIST")
     for w in warnings_list:
         warnings.warn(w, UserWarning, stacklevel=2)
     return warnings_list

@@ -201,6 +201,121 @@ export interface DiagnoseResponse {
   message: string;
 }
 
+export interface AlertAnalyzeRequest {
+  alert_name: string;
+  severity?: string;
+  service?: string;
+  instance?: string;
+  metric_name?: string;
+  metric_value?: number;
+  threshold?: number;
+  starts_at?: string;
+  ends_at?: string;
+  description?: string;
+  labels?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  source?: string;
+  lookback_minutes?: number;
+}
+
+export interface NormalizedAlert {
+  alert_name: string;
+  severity: string;
+  service?: string | null;
+  instance?: string | null;
+  metric_name?: string | null;
+  metric_value?: number | null;
+  threshold?: number | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  description: string;
+  labels: Record<string, unknown>;
+  annotations: Record<string, unknown>;
+  source: string;
+  lookback_minutes: number;
+}
+
+export interface AlertAnalysisResult {
+  event_id?: number;
+  alert: NormalizedAlert;
+  query: string;
+  rca: Record<string, unknown>;
+  final_decision?: Decision | null;
+  mode: string;
+}
+
+export interface AlertEventSummary {
+  id: number;
+  source: string;
+  alert_name: string;
+  severity: string;
+  service?: string | null;
+  instance?: string | null;
+  status: string;
+  fingerprint?: string | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  description: string;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AlertEventDetail extends AlertEventSummary {
+  labels: Record<string, unknown>;
+  annotations: Record<string, unknown>;
+  alert: Record<string, unknown>;
+  query: string;
+  rca: Record<string, unknown>;
+  final_decision?: AlertFinalDecision | null;
+}
+
+export interface AlertLogEvidence {
+  status?: 'matched' | 'weak_matched' | 'not_found' | string;
+  summary?: string;
+  top_patterns?: string[];
+  sample_logs?: string[];
+  suspected_component?: string;
+  confidence?: 'HIGH' | 'MEDIUM' | 'LOW' | string;
+  match_score?: number;
+  matched_fields?: string[];
+  source_type?: string;
+}
+
+export interface AlertFinalDecision {
+  is_final?: boolean;
+  problem_type?: string;
+  root_cause?: string;
+  root_cause_summary?: string;
+  impact?: string;
+  recommendation?: string;
+  action_plan?: string;
+  risk_level?: string;
+  confidence?: string;
+  decision?: string;
+  reasoning?: string;
+  analysis_summary?: string;
+  evidence_chain?: string[];
+  propagation_path?: string[];
+  affected_services?: string[];
+  log_evidence?: AlertLogEvidence;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface AlertWebhookSecurityConfig {
+  ipWhitelist: string[];
+  ipWhitelistText: string;
+  trustProxyHeaders: boolean;
+  updatedBy?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface AlertWebhookSecurityConfigPayload {
+  ip_whitelist: string;
+  trust_proxy_headers: boolean;
+}
+
 export interface ChatSessionSummary {
   session_id: string;
   title: string;

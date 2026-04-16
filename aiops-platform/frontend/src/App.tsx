@@ -6,6 +6,7 @@ import {
   DashboardOutlined,
   FileTextOutlined,
   BugOutlined,
+  AlertOutlined,
   ApiOutlined,
   UserOutlined,
   LogoutOutlined,
@@ -17,6 +18,9 @@ import LogList from './pages/LogList';
 import LogUpload from './pages/LogUpload';
 import LogSettings from './pages/LogSettings';
 import Diagnose from './pages/Diagnose';
+import AlertCenter from './pages/AlertCenter';
+import AlertAnalysis from './pages/AlertAnalysis';
+import AlertSecuritySettings from './pages/AlertSecuritySettings';
 import KnowledgeGraph from './pages/KnowledgeGraph';
 import ModelHub from './pages/ModelHub';
 import Login from './pages/Login';
@@ -58,6 +62,17 @@ const menuItems: MenuItemConfig[] = [
       { key: '/logs/settings', label: '日志配置', path: '/logs/settings', adminOnly: true },
     ],
   },
+  {
+    key: '/alerts-group',
+    icon: <AlertOutlined />,
+    label: '告警中心',
+    permission: 'diagnose:view',
+    children: [
+      { key: '/alerts', label: '告警事件', path: '/alerts', permission: 'diagnose:view' },
+      { key: '/alerts/analyze', label: '手工分析', path: '/alerts/analyze', permission: 'diagnose:view' },
+      { key: '/alerts/settings', label: '安全配置', path: '/alerts/settings', adminOnly: true },
+    ],
+  },
   { key: '/diagnose', icon: <BugOutlined />, label: '故障诊断', path: '/diagnose', permission: 'diagnose:view' },
   { key: '/knowledge', icon: <ApiOutlined />, label: '知识图谱', path: '/knowledge', permission: 'knowledge:view' },
   { key: '/models', icon: <SettingOutlined />, label: '模型管理', path: '/models', permission: null, adminOnly: true },
@@ -79,6 +94,10 @@ const AppContent = () => {
     }
     if (location.pathname.startsWith('/logs')) {
       setOpenKeys(['/logs-group']);
+      return;
+    }
+    if (location.pathname.startsWith('/alerts')) {
+      setOpenKeys(['/alerts-group']);
     }
   }, [location.pathname, collapsed]);
 
@@ -225,6 +244,21 @@ const AppContent = () => {
               <Route path="/diagnose" element={
                 <PrivateRoute requiredPermission="diagnose:view">
                   <Diagnose />
+                </PrivateRoute>
+              } />
+              <Route path="/alerts" element={
+                <PrivateRoute requiredPermission="diagnose:view">
+                  <AlertCenter />
+                </PrivateRoute>
+              } />
+              <Route path="/alerts/analyze" element={
+                <PrivateRoute requiredPermission="diagnose:view">
+                  <AlertAnalysis />
+                </PrivateRoute>
+              } />
+              <Route path="/alerts/settings" element={
+                <PrivateRoute requireAdmin>
+                  <AlertSecuritySettings />
                 </PrivateRoute>
               } />
               <Route path="/knowledge" element={

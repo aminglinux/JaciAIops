@@ -82,6 +82,10 @@ class DiagnosisDecision(BaseModel):
     decision: str = Field("MANUAL_INTERVENTION", description="EXECUTE_FIX, NEED_MORE_INFO, MANUAL_INTERVENTION, RESOLVED")
     reasoning: str = ""
     analysis_summary: str = ""
+    evidence_chain: List[str] = Field(default_factory=list)
+    propagation_path: List[str] = Field(default_factory=list)
+    affected_services: List[str] = Field(default_factory=list)
+    log_evidence: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionHistoryItem(BaseModel):

@@ -192,6 +192,42 @@ class ChatMessage(Base):
 
     session = relationship("ChatSession", back_populates="messages")
 
+
+class AlertEvent(Base):
+    __tablename__ = "alert_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String(50), default="custom", nullable=False, index=True)
+    alert_name = Column(String(255), nullable=False, index=True)
+    severity = Column(String(50), default="warning", nullable=False, index=True)
+    service = Column(String(255), nullable=True, index=True)
+    instance = Column(String(255), nullable=True, index=True)
+    status = Column(String(20), default="completed", nullable=False, index=True)
+    fingerprint = Column(String(255), nullable=True, index=True)
+    starts_at = Column(DateTime, nullable=True)
+    ends_at = Column(DateTime, nullable=True)
+    query_text = Column(Text, nullable=False)
+    description = Column(Text, default="", nullable=False)
+    labels_json = Column(Text, default="{}")
+    annotations_json = Column(Text, default="{}")
+    normalized_alert_json = Column(Text, default="{}")
+    rca_json = Column(Text, default="{}")
+    final_decision_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AlertWebhookSecurityConfig(Base):
+    __tablename__ = "alert_webhook_security_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ip_whitelist = Column(Text, default="", nullable=False)
+    trust_proxy_headers = Column(Boolean, default=False, nullable=False)
+    updated_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 

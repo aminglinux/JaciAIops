@@ -28,6 +28,7 @@ class MasterAgent:
         self,
         user_query: str,
         intent_data: Dict,
+        extra_context: Optional[Dict[str, Any]] = None,
         max_iterations: int = 40
     ) -> Dict[str, Any]:
         """
@@ -44,7 +45,7 @@ class MasterAgent:
         relevant_skills = self.skill_manager.search_relevant_skills(user_query, intent_data)
         skills_content = self._get_skills_content(relevant_skills)
         
-        messages = self._build_initial_messages(user_query, intent_data, skills_content)
+        messages = self._build_initial_messages(user_query, intent_data, skills_content, extra_context)
         
         execution_history = []
         iteration = 0
@@ -108,6 +109,7 @@ class MasterAgent:
                     
                     # ReAct 终止条件：LLM 主动提交诊断结果
                     if tool_name == "submit_diagnosis_result":
+                        extra_params = tool_result.get("extra_params", {})
                         return {
                             "status": "completed",
                             "execution_history": execution_history,
@@ -119,7 +121,12 @@ class MasterAgent:
                                 "recommendation": tool_result.get("recommendation", ""),
                                 "risk_level": tool_result.get("risk_level", "MEDIUM"),
                                 "confidence": tool_result.get("confidence", "MEDIUM"),
-                                "analysis_summary": tool_result.get("analysis_summary", "")
+                                "analysis_summary": tool_result.get("analysis_summary", ""),
+                                "evidence_chain": tool_result.get("evidence_chain", []),
+                                "propagation_path": tool_result.get("propagation_path", []),
+                                "affected_services": tool_result.get("affected_services", []),
+                                "log_evidence": tool_result.get("log_evidence", {}),
+                                **extra_params,
                             },
                             "raw_response": tool_result.get("analysis_summary", "诊断完成")
                         }
@@ -135,7 +142,8 @@ class MasterAgent:
         self,
         user_query: str,
         intent_data: Dict,
-        skills_content: str
+        skills_content: str,
+        extra_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         """
         构建初始消息
@@ -180,6 +188,23 @@ class MasterAgent:
 - 可用数据源: `local`, `prometheus`, `elasticsearch`, `loki`, `jaeger`, `aliyun_monitor`
 - 使用 `list_data_sources` 查看可用数据源
 - 使用 `load_data_from_source` 从指定数据源加载数据
+
+### 5. 告警驱动 RCA 专用规则
+如果用户问题包含 `[ALERT_RCA]` 或明显是监控告警场景，必须按以下顺序执行：
+1. 首先调用 `query_knowledge_graph` 查询告警服务的知识图谱拓扑、上下游依赖和运行位置。
+2. 调用 `list_data_sources` 确认可用数据源。
+3. 围绕告警时间窗口调用 `load_data_from_source` 拉取 metrics/logs/traces：
+   - metrics 优先使用 `prometheus` 或 `aliyun_monitor`
+   - logs 优先使用 `loki` 或 `elasticsearch`
+   - traces 优先使用 `jaeger`
+4. 日志检索是告警 RCA 的标准步骤之一，必须至少尝试一次：
+   - 如果检索到与告警时间窗口、服务、实例相关的错误日志，必须把日志作为 RCA 的重要依据
+   - 如果没有检索到强相关日志，不要中断流程；在最终结果中把 `log_evidence.status` 标记为 `not_found`
+   - 如果只检索到弱相关日志，把 `log_evidence.status` 标记为 `weak_matched`
+   - 最终调用 `submit_diagnosis_result` 时，必须填写 `log_evidence`、`evidence_chain`、`propagation_path`
+5. 如果能识别异常服务列表和依赖图，调用 `build_service_graph` 与 `gnn_root_cause_analysis` 生成 Top-K 根因候选。
+6. 最终必须调用 `submit_diagnosis_result`，输出直接根因、受影响服务、证据链、传播路径、下一步建议和置信度。
+7. 如果某个数据源不可用，不要中断；说明缺失证据，并基于 KG、日志或已有证据继续分析。
 
 ---
 
@@ -333,11 +358,21 @@ reasoning: "根据 mysql_deadlock_skill，先获取死锁日志，再检查当�
 5. GNN 分析完成并生成报告
 """
         
+        extra_context_block = ""
+        if extra_context:
+            extra_context_block = f"""
+
+## 系统预采集上下文
+以下内容由系统在进入动态编排前预先采集，可直接作为分析输入：
+{json.dumps(extra_context, ensure_ascii=False, indent=2)}
+"""
+
         user_message = f"""## 用户查询
 {user_query}
 
 ## 意图识别结果
 {json.dumps(intent_data, ensure_ascii=False, indent=2)}
+{extra_context_block}
 
 请根据 skill 文件中的方法，开始诊断流程。"""
         

@@ -479,6 +479,10 @@ class ToolRegistry:
         risk_level: str = "MEDIUM",
         confidence: str = "MEDIUM",
         analysis_summary: str = "",
+        evidence_chain: list | None = None,
+        propagation_path: list | None = None,
+        affected_services: list | None = None,
+        log_evidence: dict | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -495,6 +499,10 @@ class ToolRegistry:
             "risk_level": risk_level,
             "confidence": confidence,
             "analysis_summary": analysis_summary,
+            "evidence_chain": evidence_chain or [],
+            "propagation_path": propagation_path or [],
+            "affected_services": affected_services or [],
+            "log_evidence": log_evidence or {},
             "message": "诊断结果已提交",
             "extra_params": kwargs
         }
@@ -1074,6 +1082,55 @@ class ToolRegistry:
                             "analysis_summary": {
                                 "type": "string",
                                 "description": "分析过程摘要，包括执行的检查命令和关键发现"
+                            },
+                            "evidence_chain": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "用于支撑结论的关键证据链，建议按 KG/metrics/logs/traces 顺序组织"
+                            },
+                            "propagation_path": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "问题传播路径或依赖链路，例如 order-service -> payment-service -> redis"
+                            },
+                            "affected_services": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "确认受到影响的服务列表"
+                            },
+                            "log_evidence": {
+                                "type": "object",
+                                "description": "日志证据。即使没有命中相关日志，也必须给出状态说明。",
+                                "properties": {
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["matched", "weak_matched", "not_found"],
+                                        "description": "日志证据状态：强命中/弱命中/未命中"
+                                    },
+                                    "summary": {
+                                        "type": "string",
+                                        "description": "日志证据摘要，未命中时说明原因"
+                                    },
+                                    "top_patterns": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "命中的关键日志模式或错误关键词"
+                                    },
+                                    "sample_logs": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "代表性日志样本，注意脱敏"
+                                    },
+                                    "suspected_component": {
+                                        "type": "string",
+                                        "description": "日志指向的可疑组件"
+                                    },
+                                    "confidence": {
+                                        "type": "string",
+                                        "enum": ["HIGH", "MEDIUM", "LOW"],
+                                        "description": "基于日志证据的置信度"
+                                    }
+                                }
                             }
                         },
                         "required": ["problem_type", "root_cause", "impact", "recommendation"]
