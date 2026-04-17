@@ -65,22 +65,48 @@ const ModelHub = () => {
     [models]
   );
 
+  const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new Error(`${label} 请求超时`));
+      }, timeoutMs);
+      promise
+        .then((result) => resolve(result))
+        .catch((error) => reject(error))
+        .finally(() => window.clearTimeout(timer));
+    });
+  };
+
   const fetchData = async () => {
     setLoading(true);
-    try {
-      const [providerData, modelData, bindingData] = await Promise.all([
-        llmApi.getProviders(),
-        llmApi.getModels(),
-        llmApi.getBindings(),
-      ]);
-      setProviders(providerData);
-      setModels(modelData);
-      setBindings(bindingData.bindings);
-    } catch (error) {
-      message.error('获取模型配置失败');
-    } finally {
-      setLoading(false);
+    const [providerData, modelData, bindingData] = await Promise.allSettled([
+      withTimeout(llmApi.getProviders(), 15000, 'Provider 列表'),
+      withTimeout(llmApi.getModels(), 15000, '模型列表'),
+      withTimeout(llmApi.getBindings(), 15000, '场景绑定'),
+    ]);
+
+    if (providerData.status === 'fulfilled') {
+      setProviders(providerData.value);
+    } else {
+      setProviders([]);
+      message.warning('加载 Provider 列表失败');
     }
+
+    if (modelData.status === 'fulfilled') {
+      setModels(modelData.value);
+    } else {
+      setModels([]);
+      message.warning('加载模型列表失败');
+    }
+
+    if (bindingData.status === 'fulfilled') {
+      setBindings(bindingData.value.bindings || []);
+    } else {
+      setBindings([]);
+      message.warning('加载场景绑定失败');
+    }
+
+    setLoading(false);
   };
 
   useEffect(() => {
