@@ -269,18 +269,37 @@ const LogAnomalyAnalysis = () => {
 
   const handleReplayHistory = async (item: LogAnalyzeHistoryItem) => {
     try {
-      const detail = await alertsApi.getEvent(item.event_id);
-      const rca = toRecord(detail.rca);
-      const processEventsRaw = Array.isArray(rca.process_events) ? rca.process_events : [];
-      const processEventsMapped = processEventsRaw.map((evt) => toRecord(evt)).map((evt) => ({
-        timestamp: String(evt.timestamp || ''),
-        node: String(evt.node || 'unknown'),
-        status: String(evt.status || 'info'),
-        description: String(evt.description || ''),
-        detail: toRecord(evt.detail),
-      }));
-      setHistoryReplayEvents(processEventsMapped);
-      setHistoryReplayTitle(`会话 #${item.event_id} - ${item.alert_name}`);
+      if (typeof item.event_id === 'number') {
+        const detail = await alertsApi.getEvent(item.event_id);
+        const rca = toRecord(detail.rca);
+        const processEventsRaw = Array.isArray(rca.process_events) ? rca.process_events : [];
+        const processEventsMapped = processEventsRaw.map((evt) => toRecord(evt)).map((evt) => ({
+          timestamp: String(evt.timestamp || ''),
+          node: String(evt.node || 'unknown'),
+          status: String(evt.status || 'info'),
+          description: String(evt.description || ''),
+          detail: toRecord(evt.detail),
+        }));
+        setHistoryReplayEvents(processEventsMapped);
+        setHistoryReplayTitle(`会话 #${item.event_id} - ${item.alert_name}`);
+        return;
+      }
+
+      if (item.task_id) {
+        const task = await alertsApi.getAnalyzeFromLogsTask(item.task_id);
+        const processEventsMapped = (task.events || []).map((evt) => ({
+          timestamp: String(evt.timestamp || ''),
+          node: String(evt.node || 'unknown'),
+          status: String(evt.status || 'info'),
+          description: String(evt.description || ''),
+          detail: toRecord(evt.detail),
+        }));
+        setHistoryReplayEvents(processEventsMapped);
+        setHistoryReplayTitle(`失败会话 ${item.task_id} - ${item.alert_name}`);
+        return;
+      }
+
+      message.info('该历史会话缺少可回看标识');
     } catch {
       message.error('读取历史会话详情失败');
     }
@@ -484,20 +503,25 @@ const LogAnomalyAnalysis = () => {
                 locale={{ emptyText: '暂无历史分析会话' }}
                 renderItem={(item) => (
                   <List.Item
+                    key={item.task_id || item.event_id || `${item.alert_name}-${item.created_at || ''}`}
                     actions={[
-                      <Button key={`replay-${item.event_id}`} size="small" type="link" onClick={() => void handleReplayHistory(item)}>
+                      <Button key={`replay-${item.task_id || item.event_id || 'unknown'}`} size="small" type="link" onClick={() => void handleReplayHistory(item)}>
                         回看过程
                       </Button>,
                     ]}
                   >
                     <Space direction="vertical" size={0} style={{ width: '100%' }}>
                       <Text strong>{item.alert_name}</Text>
-                      <Text type="secondary">会话ID: {item.event_id} | {item.created_at ? new Date(item.created_at).toLocaleString() : '-'}</Text>
+                      <Text type="secondary">
+                        会话ID: {typeof item.event_id === 'number' ? item.event_id : item.task_id || '-'} | {item.created_at ? new Date(item.created_at).toLocaleString() : '-'}
+                      </Text>
                       <Space size={[4, 4]} wrap>
                         <Tag>{item.severity}</Tag>
-                        <Tag color="blue">{item.status}</Tag>
+                        <Tag color={item.status === 'failed' ? 'red' : 'blue'}>{item.status}</Tag>
+                        {item.is_failed_task ? <Tag color="red">失败会话</Tag> : null}
                         <Tag color="purple">过程事件 {item.process_events_count}</Tag>
                       </Space>
+                      {item.root_cause_summary ? <Text type="secondary">{item.root_cause_summary}</Text> : null}
                     </Space>
                   </List.Item>
                 )}

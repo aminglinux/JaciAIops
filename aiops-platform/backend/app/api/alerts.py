@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import MultiAgentOrchestrator
 from app.api.auth import User, get_current_user, require_admin
+from app.core.config import settings
 from app.core.database import AlertEvent, Log, SessionLocal, get_db
 from app.services import alert_security_config_manager, ip_access_controller
 from app.services.alert_normalizer import AlertAnalyzeRequest, NormalizedAlert, alert_normalizer
@@ -61,7 +62,7 @@ class LogAnomalyAnalyzePayload(BaseModel):
     service: Optional[str] = None
 
 
-ALERT_ANALYZE_TIMEOUT_SECONDS = 50
+ALERT_ANALYZE_TIMEOUT_SECONDS = max(30, int(settings.ALERT_RCA_TIMEOUT_SECONDS))
 LOG_ANALYZE_TASK_KEEP = 50
 LOG_ANALYZE_HISTORY_LIMIT = 30
 _log_analyze_tasks: Dict[str, Dict[str, Any]] = {}
@@ -699,11 +700,39 @@ async def get_analyze_from_logs_history(
     db: Session = Depends(get_db),
 ):
     safe_limit = max(1, min(limit, LOG_ANALYZE_HISTORY_LIMIT))
+    task_history: List[Dict[str, Any]] = []
+    async with _log_analyze_task_lock:
+        task_snapshots = deepcopy(list(_log_analyze_tasks.values()))
+    for task in task_snapshots:
+        if not isinstance(task, dict):
+            continue
+        status = str(task.get("status") or "")
+        if status not in {"completed", "failed"}:
+            continue
+        if task.get("event_id"):
+            continue
+        params = task.get("params", {}) if isinstance(task.get("params"), dict) else {}
+        events = task.get("events", []) if isinstance(task.get("events"), list) else []
+        task_history.append(
+            {
+                "task_id": task.get("task_id"),
+                "event_id": None,
+                "alert_name": params.get("alert_name") or "UploadedLogAnomalyBurst",
+                "status": status,
+                "created_at": task.get("created_at"),
+                "service": params.get("service"),
+                "severity": params.get("severity") or "warning",
+                "root_cause_summary": task.get("error") or "",
+                "process_events_count": len(events),
+                "is_failed_task": status == "failed",
+            }
+        )
+
     events = (
         db.query(AlertEvent)
         .filter(AlertEvent.source == "log_upload")
         .order_by(AlertEvent.created_at.desc())
-        .limit(safe_limit)
+        .limit(safe_limit * 2)
         .all()
     )
     history: List[Dict[str, Any]] = []
@@ -713,6 +742,7 @@ async def get_analyze_from_logs_history(
         process_events = rca_payload.get("process_events", []) if isinstance(rca_payload, dict) else []
         history.append(
             {
+                "task_id": None,
                 "event_id": event.id,
                 "alert_name": event.alert_name,
                 "status": event.status,
@@ -721,9 +751,13 @@ async def get_analyze_from_logs_history(
                 "severity": event.severity,
                 "root_cause_summary": final_decision.get("root_cause_summary") if isinstance(final_decision, dict) else "",
                 "process_events_count": len(process_events) if isinstance(process_events, list) else 0,
+                "is_failed_task": False,
             }
         )
-    return {"history": history}
+
+    merged = history + task_history
+    merged.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"history": merged[:safe_limit]}
 
 
 @router.post("/webhook/alertmanager")

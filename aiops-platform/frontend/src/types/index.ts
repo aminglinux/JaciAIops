@@ -342,7 +342,8 @@ export interface LogAnalyzeTaskStatus {
 }
 
 export interface LogAnalyzeHistoryItem {
-  event_id: number;
+  task_id?: string | null;
+  event_id?: number | null;
   alert_name: string;
   status: string;
   created_at?: string | null;
@@ -350,6 +351,7 @@ export interface LogAnalyzeHistoryItem {
   severity: string;
   root_cause_summary?: string;
   process_events_count: number;
+  is_failed_task?: boolean;
 }
 
 export interface AnalysisWarning {

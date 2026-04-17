@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "qwen-plus"
     OPENAI_TIMEOUT_SECONDS: int = 30
     OPENAI_MAX_RETRIES: int = 1
+    ALERT_RCA_TIMEOUT_SECONDS: int = 180
 
     TRACE_BACKEND: str = "jaeger"
     JAEGER_QUERY_URL: str = "http://localhost:16686"
