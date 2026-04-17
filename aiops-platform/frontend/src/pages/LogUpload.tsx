@@ -132,7 +132,14 @@ const LogUpload = () => {
       setAnalyzeResult(result);
       message.success('已触发异常日志 RCA 工作流');
     } catch (error) {
-      message.error('触发异常日志分析失败');
+      const detail = typeof error === 'object' && error !== null
+        ? ((error as { response?: { data?: { detail?: string } } }).response?.data?.detail || '')
+        : '';
+      if (detail) {
+        message.info(detail);
+      } else {
+        message.error('触发异常日志分析失败');
+      }
     } finally {
       setAnalyzingAnomaly(false);
     }

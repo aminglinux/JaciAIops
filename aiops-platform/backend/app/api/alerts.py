@@ -349,8 +349,13 @@ async def analyze_from_uploaded_logs(
     safe_max_logs = max(20, min(payload.max_logs, 500))
     start_time = datetime.utcnow() - timedelta(minutes=safe_lookback)
 
+    uploaded_log_exists = db.query(Log.id).filter(Log.source == "file").first()
+    if not uploaded_log_exists:
+        raise HTTPException(status_code=400, detail="请先上传日志")
+
     anomaly_logs = (
         db.query(Log)
+        .filter(Log.source == "file")
         .filter(Log.is_anomaly == True)
         .filter(Log.timestamp >= start_time)
         .order_by(Log.timestamp.desc())
@@ -358,7 +363,7 @@ async def analyze_from_uploaded_logs(
         .all()
     )
     if not anomaly_logs:
-        raise HTTPException(status_code=400, detail="回看窗口内未发现异常日志，无法触发根因分析")
+        raise HTTPException(status_code=400, detail="上传日志中未发现异常日志，无法触发根因分析")
 
     analyze_request = _build_log_analyze_request(anomaly_logs, payload)
     alert = alert_normalizer.normalize_custom(analyze_request)
