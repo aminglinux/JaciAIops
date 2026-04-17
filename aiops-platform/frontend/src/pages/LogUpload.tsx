@@ -115,6 +115,10 @@ const LogUpload = () => {
   };
 
   const handleAnalyzeAnomalyLogs = async () => {
+    if ((stats?.total_logs || 0) <= 0) {
+      message.info('请先上传日志');
+      return;
+    }
     if ((stats?.anomaly_count || 0) <= 0) {
       message.info('当前没有异常日志，无需触发 RCA');
       return;
@@ -257,7 +261,6 @@ const LogUpload = () => {
               type="primary"
               onClick={() => void handleAnalyzeAnomalyLogs()}
               loading={analyzingAnomaly}
-              disabled={(stats?.anomaly_count || 0) <= 0}
             >
               分析异常日志（RCA）
             </Button>
