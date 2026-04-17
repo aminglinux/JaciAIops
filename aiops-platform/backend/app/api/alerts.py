@@ -1,4 +1,6 @@
 import json
+from collections import Counter
+from datetime import timedelta
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -8,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import MultiAgentOrchestrator
 from app.api.auth import User, get_current_user, require_admin
-from app.core.database import AlertEvent, get_db
+from app.core.database import AlertEvent, Log, get_db
 from app.services import alert_security_config_manager, ip_access_controller
 from app.services.alert_normalizer import AlertAnalyzeRequest, NormalizedAlert, alert_normalizer
 
@@ -47,6 +49,14 @@ class AlertWebhookSecurityConfigPayload(BaseModel):
     trust_proxy_headers: bool = False
 
 
+class LogAnomalyAnalyzePayload(BaseModel):
+    lookback_minutes: int = 30
+    max_logs: int = 200
+    alert_name: Optional[str] = None
+    severity: str = "warning"
+    service: Optional[str] = None
+
+
 def _safe_json_loads(value: Optional[str], default: Any) -> Any:
     if not value:
         return default
@@ -67,6 +77,78 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(normalized)
     except ValueError:
         return None
+
+
+def _extract_log_context(content: str) -> Dict[str, str]:
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    service = payload.get("service") or payload.get("app")
+    instance = payload.get("instance") or payload.get("host") or payload.get("pod")
+    metric_name = payload.get("metric_name")
+    return {
+        "service": str(service) if service else "",
+        "instance": str(instance) if instance else "",
+        "metric_name": str(metric_name) if metric_name else "",
+    }
+
+
+def _build_log_analyze_request(logs: List[Log], payload: LogAnomalyAnalyzePayload) -> AlertAnalyzeRequest:
+    service_counter: Counter[str] = Counter()
+    instance_counter: Counter[str] = Counter()
+    metric_counter: Counter[str] = Counter()
+    sample_errors: List[str] = []
+
+    for item in logs:
+        context = _extract_log_context(item.content or "")
+        if context.get("service"):
+            service_counter[context["service"]] += 1
+        if context.get("instance"):
+            instance_counter[context["instance"]] += 1
+        if context.get("metric_name"):
+            metric_counter[context["metric_name"]] += 1
+        if item.level in {"ERROR", "WARN"} and len(sample_errors) < 5:
+            sample_errors.append((item.content or "")[:180])
+
+    detected_service = payload.service or (service_counter.most_common(1)[0][0] if service_counter else None)
+    detected_instance = instance_counter.most_common(1)[0][0] if instance_counter else None
+    detected_metric = metric_counter.most_common(1)[0][0] if metric_counter else "anomaly_logs.count"
+
+    starts_at = min(item.timestamp for item in logs).isoformat() if logs else None
+    ends_at = max(item.timestamp for item in logs).isoformat() if logs else None
+    total_anomalies = len(logs)
+
+    labels: Dict[str, Any] = {
+        "source_type": "uploaded_logs",
+        "anomaly_count": total_anomalies,
+        "top_services": [name for name, _ in service_counter.most_common(3)],
+        "top_instances": [name for name, _ in instance_counter.most_common(3)],
+    }
+    annotations: Dict[str, Any] = {
+        "summary": f"检测到 {total_anomalies} 条异常日志，触发根因分析",
+        "sample_errors": sample_errors,
+    }
+
+    return AlertAnalyzeRequest(
+        alert_name=payload.alert_name or "UploadedLogAnomalyBurst",
+        severity=payload.severity or "warning",
+        service=detected_service,
+        instance=detected_instance,
+        metric_name=detected_metric,
+        metric_value=float(total_anomalies),
+        threshold=max(1.0, float(total_anomalies // 2)),
+        starts_at=starts_at,
+        ends_at=ends_at,
+        description=f"日志上传后发现异常日志激增，共 {total_anomalies} 条，需执行 RCA 工作流",
+        labels=labels,
+        annotations=annotations,
+        source="log_upload",
+        lookback_minutes=max(1, int(payload.lookback_minutes or 30)),
+    )
 
 
 def _build_response(alert: NormalizedAlert, query: str, result: Dict[str, Any], event_id: Optional[int] = None) -> Dict[str, Any]:
@@ -228,6 +310,39 @@ async def analyze_alert(
     result = await orchestrator.process_query(query)
     event = _save_alert_event(db, alert, query, result)
     return _build_response(alert, query, result, event.id)
+
+
+@router.post("/analyze-from-logs")
+async def analyze_from_uploaded_logs(
+    payload: LogAnomalyAnalyzePayload,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    safe_lookback = max(1, min(payload.lookback_minutes, 24 * 60))
+    safe_max_logs = max(20, min(payload.max_logs, 500))
+    start_time = datetime.utcnow() - timedelta(minutes=safe_lookback)
+
+    anomaly_logs = (
+        db.query(Log)
+        .filter(Log.is_anomaly == True)
+        .filter(Log.timestamp >= start_time)
+        .order_by(Log.timestamp.desc())
+        .limit(safe_max_logs)
+        .all()
+    )
+    if not anomaly_logs:
+        raise HTTPException(status_code=400, detail="回看窗口内未发现异常日志，无法触发根因分析")
+
+    analyze_request = _build_log_analyze_request(anomaly_logs, payload)
+    alert = alert_normalizer.normalize_custom(analyze_request)
+    query = alert_normalizer.build_rca_query(alert)
+    result = await orchestrator.process_query(query)
+    event = _save_alert_event(db, alert, query, result)
+
+    response = _build_response(alert, query, result, event.id)
+    response["anomaly_logs"] = len(anomaly_logs)
+    response["lookback_minutes"] = safe_lookback
+    return response
 
 
 @router.post("/webhook/alertmanager")

@@ -3,6 +3,7 @@ import { message } from 'antd';
 import type {
   Log,
   LogStats,
+  LogUploadResult,
   LogSourceConfig,
   LogSourceConfigPayload,
   LogSourceTestResult,
@@ -11,6 +12,8 @@ import type {
   DiagnoseResponse,
   AlertAnalyzeRequest,
   AlertAnalysisResult,
+  LogAnomalyAnalyzeRequest,
+  LogAnomalyAnalyzeResult,
   AlertEventSummary,
   AlertEventDetail,
   AlertWebhookSecurityConfig,
@@ -117,10 +120,10 @@ export const logsApi = {
     return response.data;
   },
 
-  uploadFile: async (file: File): Promise<{ message: string; filename: string }> => {
+  uploadFile: async (file: File): Promise<LogUploadResult> => {
     const formData = new FormData();
     formData.append('file', file);
-    const response = await api.post('/logs/upload', formData, {
+    const response = await api.post<LogUploadResult>('/logs/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
@@ -182,6 +185,11 @@ export const agentApi = {
 export const alertsApi = {
   analyze: async (request: AlertAnalyzeRequest): Promise<AlertAnalysisResult> => {
     const response = await api.post<AlertAnalysisResult>('/alerts/analyze', request);
+    return response.data;
+  },
+
+  analyzeFromLogs: async (request: LogAnomalyAnalyzeRequest): Promise<LogAnomalyAnalyzeResult> => {
+    const response = await api.post<LogAnomalyAnalyzeResult>('/alerts/analyze-from-logs', request);
     return response.data;
   },
 
@@ -381,5 +389,3 @@ export const observabilityRuntimeApi = {
     return response.data;
   },
 };
-
-export const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/logs/ws/simulate`;

@@ -55,6 +55,14 @@ export interface LogStats {
   top_patterns: Array<{ content: string; score: number }>;
 }
 
+export interface LogUploadResult {
+  message: string;
+  filename: string;
+  logs_created: number;
+  anomaly_count: number;
+  upload_time: string;
+}
+
 export interface LogSourceConfig {
   elasticsearchEnabled: boolean;
   elasticsearchUrl: string;
@@ -268,6 +276,19 @@ export interface AlertAnalysisResult {
   rca: Record<string, unknown>;
   final_decision?: Decision | null;
   mode: string;
+}
+
+export interface LogAnomalyAnalyzeRequest {
+  lookback_minutes?: number;
+  max_logs?: number;
+  alert_name?: string;
+  severity?: string;
+  service?: string;
+}
+
+export interface LogAnomalyAnalyzeResult extends AlertAnalysisResult {
+  anomaly_logs: number;
+  lookback_minutes: number;
 }
 
 export interface AlertEventSummary {

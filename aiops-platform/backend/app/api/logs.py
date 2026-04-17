@@ -1,9 +1,8 @@
 import json
-import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi import Depends
@@ -78,6 +77,14 @@ class LogSourceTestResponse(BaseModel):
     success: bool
     message: str
     details: Optional[Dict[str, Any]] = None
+
+
+class UploadLogResponse(BaseModel):
+    message: str
+    filename: str
+    logs_created: int
+    anomaly_count: int
+    upload_time: datetime
 
 
 INCIDENT_KEYWORDS = ["error", "exception", "fail", "failed", "timeout", "refused", "panic", "oom", "fatal"]
@@ -422,7 +429,7 @@ async def _query_loki_logs(
     results.sort(key=lambda item: item.timestamp, reverse=True)
     return results[:limit]
 
-@router.post("/upload")
+@router.post("/upload", response_model=UploadLogResponse)
 async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith(('.log', '.txt')):
         raise HTTPException(status_code=400, detail="只支持 .log 和 .txt 文件")
@@ -433,6 +440,7 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
     
     lines = content.decode('utf-8', errors='ignore').split('\n')
     logs_created = 0
+    anomaly_count = 0
     
     for line in lines:
         line = line.strip()
@@ -448,6 +456,8 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
             level = "DEBUG"
         
         is_anomaly, score = detector.detect(line)
+        if is_anomaly:
+            anomaly_count += 1
         
         log = Log(
             level=level,
@@ -463,7 +473,10 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
     
     return {
         "message": f"成功上传 {logs_created} 条日志",
-        "filename": file.filename
+        "filename": file.filename,
+        "logs_created": logs_created,
+        "anomaly_count": anomaly_count,
+        "upload_time": datetime.utcnow(),
     }
 
 @router.post("/ingest", response_model=LogResponse)
@@ -727,65 +740,3 @@ async def get_stats(db: Session = Depends(get_db)):
         level_distribution=level_counts,
         top_patterns=top_patterns
     )
-
-active_connections = []
-
-@router.websocket("/ws/simulate")
-async def websocket_simulate_logs(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.append(websocket)
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            
-            if data == "start":
-                import random
-                levels = ["INFO", "WARN", "ERROR", "DEBUG"]
-                templates = [
-                    "Request processed in {time}ms",
-                    "Connection established to {service}",
-                    "Cache hit ratio: {ratio}%",
-                    "Database query executed: {query}",
-                    "ERROR: Connection timeout to {service}",
-                    "WARN: High memory usage: {mem}%",
-                    "ERROR: Failed to process request: {error}"
-                ]
-                
-                while True:
-                    try:
-                        level = random.choice(levels)
-                        template = random.choice(templates)
-                        content = template.format(
-                            time=random.randint(10, 500),
-                            service=random.choice(["redis", "mysql", "kafka"]),
-                            ratio=random.randint(70, 99),
-                            query=f"SELECT * FROM table_{random.randint(1,10)}",
-                            mem=random.randint(60, 95),
-                            error=random.choice(["timeout", "connection refused", "OOM"])
-                        )
-                        
-                        is_anomaly, score = detector.detect(content)
-                        
-                        log_entry = {
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "level": level,
-                            "content": content,
-                            "is_anomaly": is_anomaly,
-                            "anomaly_score": score
-                        }
-                        
-                        await websocket.send_json(log_entry)
-                        await asyncio.sleep(1)
-                        
-                    except Exception:
-                        break
-            
-            elif data == "stop":
-                break
-                
-    except WebSocketDisconnect:
-        pass
-    finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
