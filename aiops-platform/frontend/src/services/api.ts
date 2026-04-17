@@ -17,6 +17,9 @@ import type {
   AlertAnalysisResult,
   LogAnomalyAnalyzeRequest,
   LogAnomalyAnalyzeResult,
+  LogAnalyzeStartResult,
+  LogAnalyzeTaskStatus,
+  LogAnalyzeHistoryItem,
   AlertEventSummary,
   AlertEventDetail,
   AlertWebhookSecurityConfig,
@@ -210,6 +213,21 @@ export const alertsApi = {
 
   analyzeFromLogs: async (request: LogAnomalyAnalyzeRequest): Promise<LogAnomalyAnalyzeResult> => {
     const response = await api.post<LogAnomalyAnalyzeResult>('/alerts/analyze-from-logs', request);
+    return response.data;
+  },
+
+  startAnalyzeFromLogs: async (request: LogAnomalyAnalyzeRequest): Promise<LogAnalyzeStartResult> => {
+    const response = await api.post<LogAnalyzeStartResult>('/alerts/analyze-from-logs/start', request);
+    return response.data;
+  },
+
+  getAnalyzeFromLogsTask: async (taskId: string): Promise<LogAnalyzeTaskStatus> => {
+    const response = await api.get<LogAnalyzeTaskStatus>(`/alerts/analyze-from-logs/tasks/${taskId}`);
+    return response.data;
+  },
+
+  getAnalyzeFromLogsHistory: async (limit: number = 20): Promise<{ history: LogAnalyzeHistoryItem[] }> => {
+    const response = await api.get<{ history: LogAnalyzeHistoryItem[] }>('/alerts/analyze-from-logs/history', { params: { limit } });
     return response.data;
   },
 

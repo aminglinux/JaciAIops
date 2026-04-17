@@ -312,6 +312,44 @@ export interface LogAnomalyAnalyzeRequest {
 export interface LogAnomalyAnalyzeResult extends AlertAnalysisResult {
   anomaly_logs: number;
   lookback_minutes: number;
+  task_id?: string;
+}
+
+export interface LogAnalyzeStartResult {
+  task_id: string;
+  status: string;
+  message: string;
+}
+
+export interface LogAnalyzeProcessEvent {
+  timestamp: string;
+  node: string;
+  status: string;
+  description: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface LogAnalyzeTaskStatus {
+  task_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | string;
+  created_at: string;
+  updated_at: string;
+  params?: LogAnomalyAnalyzeRequest;
+  events: LogAnalyzeProcessEvent[];
+  result?: LogAnomalyAnalyzeResult | null;
+  error?: string | null;
+  event_id?: number | null;
+}
+
+export interface LogAnalyzeHistoryItem {
+  event_id: number;
+  alert_name: string;
+  status: string;
+  created_at?: string | null;
+  service?: string | null;
+  severity: string;
+  root_cause_summary?: string;
+  process_events_count: number;
 }
 
 export interface AnalysisWarning {

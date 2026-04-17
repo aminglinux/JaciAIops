@@ -1,5 +1,7 @@
 import json
 import asyncio
+import uuid
+from copy import deepcopy
 from collections import Counter
 from datetime import timedelta
 from datetime import datetime
@@ -11,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import MultiAgentOrchestrator
 from app.api.auth import User, get_current_user, require_admin
-from app.core.database import AlertEvent, Log, get_db
+from app.core.database import AlertEvent, Log, SessionLocal, get_db
 from app.services import alert_security_config_manager, ip_access_controller
 from app.services.alert_normalizer import AlertAnalyzeRequest, NormalizedAlert, alert_normalizer
 
@@ -59,6 +61,10 @@ class LogAnomalyAnalyzePayload(BaseModel):
 
 
 ALERT_ANALYZE_TIMEOUT_SECONDS = 50
+LOG_ANALYZE_TASK_KEEP = 50
+LOG_ANALYZE_HISTORY_LIMIT = 30
+_log_analyze_tasks: Dict[str, Dict[str, Any]] = {}
+_log_analyze_task_lock = asyncio.Lock()
 
 
 def _safe_json_loads(value: Optional[str], default: Any) -> Any:
@@ -212,6 +218,234 @@ def _serialize_event(event: AlertEvent) -> AlertEventDetail:
         rca=_safe_json_loads(event.rca_json, {}),
         final_decision=_safe_json_loads(event.final_decision_json, None),
     )
+
+
+def _safe_content_preview(content: str, max_len: int = 220) -> str:
+    normalized = (content or "").replace("\n", " ").strip()
+    return normalized[:max_len]
+
+
+def _build_anomaly_log_samples(logs: List[Log], max_samples: int = 5) -> List[Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    for item in logs[:max_samples]:
+        samples.append(
+            {
+                "id": item.id,
+                "timestamp": item.timestamp.isoformat() if item.timestamp else "",
+                "level": item.level,
+                "content_preview": _safe_content_preview(item.content or ""),
+                "upload_batch_id": item.upload_batch_id,
+                "anomaly_score": item.anomaly_score,
+            }
+        )
+    return samples
+
+
+async def _append_log_task_event(task_id: str, event: Dict[str, Any]) -> None:
+    async with _log_analyze_task_lock:
+        task = _log_analyze_tasks.get(task_id)
+        if not task:
+            return
+        events = task.setdefault("events", [])
+        events.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "node": event.get("node", "unknown"),
+                "status": event.get("status", "info"),
+                "description": event.get("description", ""),
+                "detail": event.get("detail"),
+            }
+        )
+        task["updated_at"] = datetime.utcnow().isoformat()
+
+
+async def _update_log_task(task_id: str, **kwargs: Any) -> None:
+    async with _log_analyze_task_lock:
+        task = _log_analyze_tasks.get(task_id)
+        if not task:
+            return
+        for key, value in kwargs.items():
+            task[key] = value
+        task["updated_at"] = datetime.utcnow().isoformat()
+
+
+async def _create_log_task_record(task_id: str, payload: LogAnomalyAnalyzePayload) -> None:
+    async with _log_analyze_task_lock:
+        _log_analyze_tasks[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "params": payload.model_dump(),
+            "events": [],
+            "result": None,
+            "error": None,
+            "event_id": None,
+        }
+        if len(_log_analyze_tasks) > LOG_ANALYZE_TASK_KEEP:
+            ordered = sorted(
+                _log_analyze_tasks.items(),
+                key=lambda item: item[1].get("updated_at", ""),
+            )
+            for old_task_id, _ in ordered[:-LOG_ANALYZE_TASK_KEEP]:
+                _log_analyze_tasks.pop(old_task_id, None)
+
+
+async def _run_log_analyze_task(task_id: str, payload: LogAnomalyAnalyzePayload) -> None:
+    db = SessionLocal()
+    try:
+        await _update_log_task(task_id, status="running")
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "init",
+                "status": "running",
+                "description": "开始分析异常日志任务",
+                "detail": payload.model_dump(),
+            },
+        )
+
+        safe_lookback = max(1, min(payload.lookback_minutes, 24 * 60))
+        safe_max_logs = max(20, min(payload.max_logs, 500))
+        start_time = datetime.utcnow() - timedelta(minutes=safe_lookback)
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "filter_anomaly_logs",
+                "status": "running",
+                "description": "过滤异常日志",
+                "detail": {"lookback_minutes": safe_lookback, "max_logs": safe_max_logs},
+            },
+        )
+
+        uploaded_log_exists = db.query(Log.id).filter(Log.source == "file").first()
+        if not uploaded_log_exists:
+            raise HTTPException(status_code=400, detail="请先上传日志")
+
+        anomaly_logs = (
+            db.query(Log)
+            .filter(Log.source == "file")
+            .filter(Log.is_anomaly == True)
+            .filter(Log.timestamp >= start_time)
+            .order_by(Log.timestamp.desc())
+            .limit(safe_max_logs)
+            .all()
+        )
+        if not anomaly_logs:
+            raise HTTPException(status_code=400, detail="上传日志中未发现异常日志，无法触发根因分析")
+
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "filter_anomaly_logs",
+                "status": "completed",
+                "description": "异常日志过滤完成",
+                "detail": {
+                    "anomaly_logs": len(anomaly_logs),
+                    "samples": _build_anomaly_log_samples(anomaly_logs),
+                },
+            },
+        )
+
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "build_alert_context",
+                "status": "running",
+                "description": "构建告警上下文",
+            },
+        )
+        analyze_request = _build_log_analyze_request(anomaly_logs, payload)
+        alert = alert_normalizer.normalize_custom(analyze_request)
+        query = alert_normalizer.build_rca_query(alert)
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "build_alert_context",
+                "status": "completed",
+                "description": "告警上下文构建完成",
+                "detail": {
+                    "alert_name": alert.alert_name,
+                    "service": alert.service,
+                    "instance": alert.instance,
+                },
+            },
+        )
+
+        async def _progress_callback(event: Dict[str, Any]) -> None:
+            await _append_log_task_event(task_id, event)
+
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "rca_workflow",
+                "status": "running",
+                "description": "开始执行 RCA 工作流",
+            },
+        )
+        result = await asyncio.wait_for(
+            orchestrator.process_query_with_progress(query, progress_callback=_progress_callback),
+            timeout=ALERT_ANALYZE_TIMEOUT_SECONDS,
+        )
+
+        task_snapshot = deepcopy(_log_analyze_tasks.get(task_id, {}))
+        result["process_events"] = task_snapshot.get("events", [])
+        event = _save_alert_event(db, alert, query, result)
+        response = _build_response(alert, query, result, event.id)
+        response["anomaly_logs"] = len(anomaly_logs)
+        response["lookback_minutes"] = safe_lookback
+        response["task_id"] = task_id
+
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "rca_workflow",
+                "status": "completed",
+                "description": "RCA 工作流执行完成",
+                "detail": {"event_id": event.id},
+            },
+        )
+        await _update_log_task(
+            task_id,
+            status="completed",
+            result=response,
+            event_id=event.id,
+        )
+    except HTTPException as exc:
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "finalize",
+                "status": "failed",
+                "description": "分析任务失败",
+                "detail": {"error": exc.detail},
+            },
+        )
+        await _update_log_task(task_id, status="failed", error=str(exc.detail))
+    except asyncio.TimeoutError:
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "finalize",
+                "status": "failed",
+                "description": "分析任务超时",
+                "detail": {"timeout_seconds": ALERT_ANALYZE_TIMEOUT_SECONDS},
+            },
+        )
+        await _update_log_task(task_id, status="failed", error=f"RCA workflow timeout after {ALERT_ANALYZE_TIMEOUT_SECONDS}s")
+    except Exception as exc:
+        await _append_log_task_event(
+            task_id,
+            {
+                "node": "finalize",
+                "status": "failed",
+                "description": "分析任务异常",
+                "detail": {"error": str(exc)},
+            },
+        )
+        await _update_log_task(task_id, status="failed", error=str(exc))
+    finally:
+        db.close()
 
 
 def _save_alert_event(
@@ -375,6 +609,67 @@ async def analyze_from_uploaded_logs(
     response["anomaly_logs"] = len(anomaly_logs)
     response["lookback_minutes"] = safe_lookback
     return response
+
+
+@router.post("/analyze-from-logs/start")
+async def start_analyze_from_uploaded_logs(
+    payload: LogAnomalyAnalyzePayload,
+    _: User = Depends(get_current_user),
+):
+    task_id = uuid.uuid4().hex
+    await _create_log_task_record(task_id, payload)
+    asyncio.create_task(_run_log_analyze_task(task_id, payload))
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "message": "已启动异常日志分析任务",
+    }
+
+
+@router.get("/analyze-from-logs/tasks/{task_id}")
+async def get_analyze_from_logs_task(
+    task_id: str,
+    _: User = Depends(get_current_user),
+):
+    async with _log_analyze_task_lock:
+        task = _log_analyze_tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="分析任务不存在或已过期")
+        return deepcopy(task)
+
+
+@router.get("/analyze-from-logs/history")
+async def get_analyze_from_logs_history(
+    limit: int = LOG_ANALYZE_HISTORY_LIMIT,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    safe_limit = max(1, min(limit, LOG_ANALYZE_HISTORY_LIMIT))
+    events = (
+        db.query(AlertEvent)
+        .filter(AlertEvent.source == "log_upload")
+        .order_by(AlertEvent.created_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    history: List[Dict[str, Any]] = []
+    for event in events:
+        rca_payload = _safe_json_loads(event.rca_json, {})
+        final_decision = _safe_json_loads(event.final_decision_json, {})
+        process_events = rca_payload.get("process_events", []) if isinstance(rca_payload, dict) else []
+        history.append(
+            {
+                "event_id": event.id,
+                "alert_name": event.alert_name,
+                "status": event.status,
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+                "service": event.service,
+                "severity": event.severity,
+                "root_cause_summary": final_decision.get("root_cause_summary") if isinstance(final_decision, dict) else "",
+                "process_events_count": len(process_events) if isinstance(process_events, list) else 0,
+            }
+        )
+    return {"history": history}
 
 
 @router.post("/webhook/alertmanager")

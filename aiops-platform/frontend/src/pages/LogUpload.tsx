@@ -1,11 +1,21 @@
-import { useEffect, useState } from 'react';
-import { Card, Typography, Upload, Button, Alert, Space, message, Statistic, Row, Col, Progress, List, Tag, Modal, InputNumber, Popconfirm, Collapse } from 'antd';
+import { useEffect, useMemo, useState } from 'react';
+import { Card, Typography, Upload, Button, Alert, Space, message, Statistic, Row, Col, Progress, List, Tag, Modal, InputNumber, Popconfirm, Collapse, Timeline } from 'antd';
 import { InboxOutlined, UploadOutlined, FileTextOutlined, ReloadOutlined, HistoryOutlined } from '@ant-design/icons';
 import type { UploadProps } from 'antd';
 import { useNavigate } from 'react-router-dom';
 
 import { alertsApi, logsApi } from '../services/api';
-import type { AlertFinalDecision, AnalysisWarning, LogAnomalyAnalyzeResult, LogStats, LogUploadResult, UploadBatchSummary } from '../types';
+import type {
+  AlertFinalDecision,
+  AnalysisWarning,
+  LogAnomalyAnalyzeResult,
+  LogStats,
+  LogUploadResult,
+  UploadBatchSummary,
+  LogAnalyzeTaskStatus,
+  LogAnalyzeProcessEvent,
+  LogAnalyzeHistoryItem,
+} from '../types';
 
 const { Title, Paragraph, Text } = Typography;
 const HISTORY_STORAGE_KEY = 'log_upload_history_v1';
@@ -32,6 +42,14 @@ const LogUpload = () => {
   const [lastUpload, setLastUpload] = useState<UploadHistoryRecord | null>(null);
   const [uploadHistory, setUploadHistory] = useState<UploadHistoryRecord[]>([]);
   const [analyzeResult, setAnalyzeResult] = useState<LogAnomalyAnalyzeResult | null>(null);
+  const [processModalOpen, setProcessModalOpen] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [currentTaskStatus, setCurrentTaskStatus] = useState<LogAnalyzeTaskStatus | null>(null);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [analysisHistory, setAnalysisHistory] = useState<LogAnalyzeHistoryItem[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyReplayEvents, setHistoryReplayEvents] = useState<LogAnalyzeProcessEvent[]>([]);
+  const [historyReplayTitle, setHistoryReplayTitle] = useState<string>('');
   const [analyzeParams, setAnalyzeParams] = useState({
     lookbackMinutes: 60,
     maxLogs: 300,
@@ -40,6 +58,11 @@ const LogUpload = () => {
   const [loadingBatches, setLoadingBatches] = useState(false);
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [clearingUploadedLogs, setClearingUploadedLogs] = useState(false);
+
+  const processEvents = useMemo(
+    () => (Array.isArray(currentTaskStatus?.events) ? currentTaskStatus?.events : []),
+    [currentTaskStatus?.events]
+  );
 
   const persistUploadHistory = (records: UploadHistoryRecord[]) => {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(records));
@@ -85,6 +108,66 @@ const LogUpload = () => {
     }
   }, []);
 
+  useEffect(() => {
+    if (!currentTaskId) {
+      return undefined;
+    }
+    let canceled = false;
+    let timer: number | null = null;
+
+    const pollTask = async () => {
+      try {
+        const task = await alertsApi.getAnalyzeFromLogsTask(currentTaskId);
+        if (canceled) {
+          return;
+        }
+        setCurrentTaskStatus(task);
+        if (task.status === 'completed') {
+          if (task.result) {
+            setAnalyzeResult(task.result);
+            message.success('异常日志分析完成');
+          }
+          setAnalyzingAnomaly(false);
+          return;
+        }
+        if (task.status === 'failed') {
+          message.error(task.error || '异常日志分析失败');
+          setAnalyzingAnomaly(false);
+          return;
+        }
+      } catch {
+        if (!canceled) {
+          message.error('读取分析进度失败');
+          setAnalyzingAnomaly(false);
+        }
+        return;
+      }
+      timer = window.setTimeout(() => {
+        void pollTask();
+      }, 1200);
+    };
+
+    void pollTask();
+    return () => {
+      canceled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [currentTaskId]);
+
+  const fetchAnalyzeHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      const response = await alertsApi.getAnalyzeFromLogsHistory(30);
+      setAnalysisHistory(response.history || []);
+    } catch {
+      message.error('读取分析历史失败');
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
   const uploadProps: UploadProps = {
     name: 'file',
     accept: '.log,.txt',
@@ -125,12 +208,14 @@ const LogUpload = () => {
     }
     setAnalyzingAnomaly(true);
     try {
-      const result = await alertsApi.analyzeFromLogs({
+      const start = await alertsApi.startAnalyzeFromLogs({
         lookback_minutes: analyzeParams.lookbackMinutes,
         max_logs: analyzeParams.maxLogs,
       });
-      setAnalyzeResult(result);
-      message.success('已触发异常日志 RCA 工作流');
+      setCurrentTaskId(start.task_id);
+      setCurrentTaskStatus(null);
+      setProcessModalOpen(true);
+      message.success(start.message || '已触发异常日志 RCA 工作流');
     } catch (error) {
       const detail = typeof error === 'object' && error !== null
         ? ((error as { response?: { data?: { detail?: string } } }).response?.data?.detail || '')
@@ -140,8 +225,9 @@ const LogUpload = () => {
       } else {
         message.error('触发异常日志分析失败');
       }
-    } finally {
       setAnalyzingAnomaly(false);
+    } finally {
+      // 进入轮询后由任务状态回调关闭 loading
     }
   };
 
@@ -196,6 +282,32 @@ const LogUpload = () => {
       message.error('清空上传日志失败');
     } finally {
       setClearingUploadedLogs(false);
+    }
+  };
+
+  const handleOpenHistoryModal = async () => {
+    setHistoryModalOpen(true);
+    setHistoryReplayEvents([]);
+    setHistoryReplayTitle('');
+    await fetchAnalyzeHistory();
+  };
+
+  const handleReplayHistory = async (item: LogAnalyzeHistoryItem) => {
+    try {
+      const detail = await alertsApi.getEvent(item.event_id);
+      const rca = toRecord(detail.rca);
+      const processEventsRaw = Array.isArray(rca.process_events) ? rca.process_events : [];
+      const processEventsMapped = processEventsRaw.map((evt) => toRecord(evt)).map((evt) => ({
+        timestamp: String(evt.timestamp || ''),
+        node: String(evt.node || 'unknown'),
+        status: String(evt.status || 'info'),
+        description: String(evt.description || ''),
+        detail: toRecord(evt.detail),
+      }));
+      setHistoryReplayEvents(processEventsMapped);
+      setHistoryReplayTitle(`会话 #${item.event_id} - ${item.alert_name}`);
+    } catch {
+      message.error('读取历史会话详情失败');
     }
   };
 
@@ -273,6 +385,9 @@ const LogUpload = () => {
             </Button>
             <Button onClick={() => setParamsModalOpen(true)}>
               分析参数
+            </Button>
+            <Button icon={<HistoryOutlined />} onClick={() => void handleOpenHistoryModal()}>
+              分析历史会话
             </Button>
           </div>
         </Space>
@@ -489,6 +604,123 @@ const LogUpload = () => {
           </Space>
         )}
       </Card>
+
+      <Modal
+        title="异常日志分析过程"
+        open={processModalOpen}
+        onCancel={() => setProcessModalOpen(false)}
+        footer={[
+          <Button key="close" onClick={() => setProcessModalOpen(false)}>
+            关闭
+          </Button>,
+        ]}
+        width={980}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            type={currentTaskStatus?.status === 'failed' ? 'error' : currentTaskStatus?.status === 'completed' ? 'success' : 'info'}
+            showIcon
+            message={`任务状态：${currentTaskStatus?.status || 'queued'}`}
+            description={currentTaskStatus?.error || `任务ID：${currentTaskId || '-'}`}
+          />
+          <Timeline
+            items={processEvents.map((event, index) => ({
+              color: event.status === 'failed' ? 'red' : event.status === 'completed' ? 'green' : event.status === 'warning' ? 'orange' : 'blue',
+              children: (
+                <Space direction="vertical" size={2}>
+                  <Text strong>{event.description || event.node}</Text>
+                  <Text type="secondary">
+                    {event.timestamp ? new Date(event.timestamp).toLocaleString() : '-'} | 节点: {event.node} | 状态: {event.status}
+                  </Text>
+                  {event.detail && Object.keys(event.detail).length > 0 && (
+                    <pre style={{ margin: 0, background: '#fafafa', padding: 8, borderRadius: 6, maxHeight: 180, overflow: 'auto' }}>
+                      {JSON.stringify(event.detail, null, 2)}
+                    </pre>
+                  )}
+                </Space>
+              ),
+              key: `${event.timestamp}-${event.node}-${index}`,
+            }))}
+          />
+          {processEvents.length === 0 && (
+            <Text type="secondary">任务已创建，等待进度事件...</Text>
+          )}
+        </Space>
+      </Modal>
+
+      <Modal
+        title="异常日志分析历史会话"
+        open={historyModalOpen}
+        onCancel={() => setHistoryModalOpen(false)}
+        footer={null}
+        width={1080}
+      >
+        <Row gutter={16}>
+          <Col span={10}>
+            <List
+              loading={loadingHistory}
+              size="small"
+              bordered
+              dataSource={analysisHistory}
+              locale={{ emptyText: '暂无历史分析会话' }}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <Button key={`replay-${item.event_id}`} size="small" type="link" onClick={() => void handleReplayHistory(item)}>
+                      回看过程
+                    </Button>,
+                  ]}
+                >
+                  <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                    <Text strong>{item.alert_name}</Text>
+                    <Text type="secondary">会话ID: {item.event_id} | {item.created_at ? new Date(item.created_at).toLocaleString() : '-'}</Text>
+                    <Space size={[4, 4]} wrap>
+                      <Tag>{item.severity}</Tag>
+                      <Tag color="blue">{item.status}</Tag>
+                      <Tag color="purple">过程事件 {item.process_events_count}</Tag>
+                    </Space>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </Col>
+          <Col span={14}>
+            <Card
+              size="small"
+              title={historyReplayTitle || '请选择左侧会话进行回看'}
+              extra={(
+                <Button size="small" icon={<ReloadOutlined />} onClick={() => void fetchAnalyzeHistory()}>
+                  刷新
+                </Button>
+              )}
+            >
+              {historyReplayEvents.length > 0 ? (
+                <Timeline
+                  items={historyReplayEvents.map((event, index) => ({
+                    color: event.status === 'failed' ? 'red' : event.status === 'completed' ? 'green' : event.status === 'warning' ? 'orange' : 'blue',
+                    children: (
+                      <Space direction="vertical" size={2}>
+                        <Text strong>{event.description || event.node}</Text>
+                        <Text type="secondary">
+                          {event.timestamp ? new Date(event.timestamp).toLocaleString() : '-'} | {event.node}
+                        </Text>
+                        {event.detail && Object.keys(event.detail).length > 0 && (
+                          <pre style={{ margin: 0, background: '#fafafa', padding: 8, borderRadius: 6, maxHeight: 160, overflow: 'auto' }}>
+                            {JSON.stringify(event.detail, null, 2)}
+                          </pre>
+                        )}
+                      </Space>
+                    ),
+                    key: `${event.timestamp}-${event.node}-${index}`,
+                  }))}
+                />
+              ) : (
+                <Text type="secondary">暂无过程明细</Text>
+              )}
+            </Card>
+          </Col>
+        </Row>
+      </Modal>
 
       <Modal
         title="分析参数"

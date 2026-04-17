@@ -1,7 +1,9 @@
 import json
 import re
 import os
-from typing import Dict, Any, List, Optional
+import inspect
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 from app.core.config import settings
 from app.services import llm_config_manager
 from .skill_manager import SkillManager
@@ -45,7 +47,8 @@ class MasterAgent:
         user_query: str,
         intent_data: Dict,
         extra_context: Optional[Dict[str, Any]] = None,
-        max_iterations: int = 40
+        max_iterations: int = 40,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> Dict[str, Any]:
         """
         根据 skill 文件动态规划并执行诊断流程
@@ -68,6 +71,15 @@ class MasterAgent:
         
         while iteration < max_iterations:
             iteration += 1
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "master_planner",
+                    "status": "running",
+                    "description": f"主控规划迭代 {iteration}/{max_iterations}",
+                    "detail": {"iteration": iteration, "max_iterations": max_iterations},
+                },
+            )
             client, llm_config = llm_config_manager.get_client_for_scene("master_planner")
 
             try:
@@ -96,6 +108,19 @@ class MasterAgent:
                         tool_args = json.loads(tool_call.function.arguments)
                     except Exception:
                         tool_args = {}
+                    await self._emit_progress(
+                        progress_callback,
+                        {
+                            "node": f"tool::{tool_name}",
+                            "status": "running",
+                            "description": f"执行工具 {tool_name}",
+                            "detail": {
+                                "iteration": iteration,
+                                "tool": tool_name,
+                                "args": tool_args,
+                            },
+                        },
+                    )
                     
                     messages.append({
                         "role": "assistant",
@@ -111,6 +136,19 @@ class MasterAgent:
                     })
                     
                     tool_result = await self.tool_registry.execute(tool_name, **tool_args)
+                    await self._emit_progress(
+                        progress_callback,
+                        {
+                            "node": f"tool::{tool_name}",
+                            "status": "completed",
+                            "description": f"工具 {tool_name} 执行完成",
+                            "detail": {
+                                "iteration": iteration,
+                                "tool": tool_name,
+                                "result_preview": str(tool_result)[:500],
+                            },
+                        },
+                    )
                     
                     execution_history.append({
                         "iteration": iteration,
@@ -155,13 +193,50 @@ class MasterAgent:
                             },
                             "raw_response": tool_result.get("analysis_summary", "诊断完成")
                         }
+            else:
+                await self._emit_progress(
+                    progress_callback,
+                    {
+                        "node": "master_planner",
+                        "status": "info",
+                        "description": "本轮未触发工具调用，继续推理",
+                        "detail": {"iteration": iteration},
+                    },
+                )
         
         # 达到最大迭代次数仍未结束，返回未完成状态
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "master_planner",
+                "status": "failed",
+                "description": "达到最大迭代次数，诊断未完成",
+                "detail": {"max_iterations": max_iterations},
+            },
+        )
         return {
             "status": "incomplete",
             "execution_history": execution_history,
             "message": "达到最大迭代次数，诊断未完成。请增加迭代次数或简化诊断范围。"
         }
+
+    async def _emit_progress(
+        self,
+        callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]],
+        payload: Dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        event = {
+            "timestamp": datetime.utcnow().isoformat(),
+            **payload,
+        }
+        try:
+            result = callback(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
     
     def _build_initial_messages(
         self,

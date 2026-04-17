@@ -1,10 +1,12 @@
 import asyncio
+import json
 import shlex
 import traceback
 import os
 import subprocess
 import re
-from typing import Dict, Any, List
+import inspect
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 from datetime import datetime, timedelta
 
 from .intent_parse import IntentParseAgent
@@ -17,6 +19,8 @@ from .tool_registry import ToolRegistry
 from ..utils.file_manager import IntermediateFileManager
 from ..utils.logger import get_logger
 from ..core.config import settings
+from ..core.database import Log, SessionLocal
+from ..services import llm_config_manager
 
 logger = get_logger("orchestrator")
 
@@ -48,6 +52,13 @@ class MultiAgentOrchestrator:
         ]
     
     async def process_query(self, user_query: str) -> Dict[str, Any]:
+        return await self._process_query(user_query=user_query, progress_callback=None)
+
+    async def _process_query(
+        self,
+        user_query: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
+    ) -> Dict[str, Any]:
         """
         处理用户查询 - 动态决策版本
         
@@ -71,14 +82,55 @@ class MultiAgentOrchestrator:
         
         try:
             is_alert_rca = self._is_alert_rca_query(user_query)
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "intent_parsing",
+                    "status": "running",
+                    "description": "开始意图识别",
+                },
+            )
             result["stages"]["intent_parsing"] = await self._stage_intent_parsing(user_query)
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "intent_parsing",
+                    "status": "completed",
+                    "description": "意图识别完成",
+                    "detail": {
+                        "intent": result["stages"]["intent_parsing"].get("intent"),
+                        "confidence": result["stages"]["intent_parsing"].get("confidence"),
+                    },
+                },
+            )
             
             intent_data = result["stages"]["intent_parsing"]
             extra_context = None
 
             if is_alert_rca:
+                await self._emit_progress(
+                    progress_callback,
+                    {
+                        "node": "alert_prefetch",
+                        "status": "running",
+                        "description": "开始告警上下文预采集（KG/指标/日志/链路）",
+                    },
+                )
                 extra_context = await self._stage_alert_rca_prefetch(user_query, intent_data)
                 result["stages"]["alert_prefetch"] = extra_context
+                await self._emit_progress(
+                    progress_callback,
+                    {
+                        "node": "alert_prefetch",
+                        "status": "completed",
+                        "description": "告警上下文预采集完成",
+                        "detail": {
+                            "metrics_status": (extra_context.get("metrics_evidence", {}) or {}).get("status"),
+                            "logs_status": (extra_context.get("log_evidence_prefetch", {}) or {}).get("status"),
+                            "trace_status": (extra_context.get("trace_evidence", {}) or {}).get("status"),
+                        },
+                    },
+                )
                 prefetch_warnings = extra_context.get("warnings", []) if isinstance(extra_context, dict) else []
                 if isinstance(prefetch_warnings, list):
                     result["warnings"] = prefetch_warnings
@@ -93,12 +145,22 @@ class MultiAgentOrchestrator:
                 "skills_content_length": len(skills_content),
                 "skills_preview": skills_content[:1000] + "..." if len(skills_content) > 1000 else skills_content
             }
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "skill_matching",
+                    "status": "completed",
+                    "description": "技能匹配完成",
+                    "detail": {"matched_skills": matched_skills[:20]},
+                },
+            )
             
             dynamic_result = await self.master_agent.plan_and_execute(
                 user_query=user_query,
                 intent_data=intent_data,
                 extra_context=extra_context,
-                max_iterations=12 if is_alert_rca else 40
+                max_iterations=12 if is_alert_rca else 40,
+                progress_callback=progress_callback,
             )
             
             result["stages"]["dynamic_execution"] = {
@@ -131,6 +193,51 @@ class MultiAgentOrchestrator:
                     result.get("final_decision", {}) or {},
                     extra_context,
                 )
+            if is_alert_rca and self._should_use_llm_fallback(result.get("final_decision", {}), extra_context):
+                await self._emit_progress(
+                    progress_callback,
+                    {
+                        "node": "llm_fallback",
+                        "status": "running",
+                        "description": "证据不足，启动 LLM 兜底分析",
+                    },
+                )
+                llm_fallback = await self._stage_llm_fallback_analysis(
+                    user_query=user_query,
+                    intent_data=intent_data,
+                    extra_context=extra_context or {},
+                )
+                result["stages"]["llm_fallback_analysis"] = llm_fallback
+                result["final_decision"] = self._merge_llm_fallback_decision(
+                    result.get("final_decision", {}) or {},
+                    llm_fallback,
+                )
+                if llm_fallback.get("status") != "ok":
+                    result.setdefault("warnings", []).append(
+                        {
+                            "code": "LLM_FALLBACK_DEGRADED",
+                            "message": "LLM 兜底分析失败，已返回基于规则的保底结论。",
+                            "impact": "建议补充日志/监控数据后重试以提高准确率",
+                        }
+                    )
+                await self._emit_progress(
+                    progress_callback,
+                    {
+                        "node": "llm_fallback",
+                        "status": "completed" if llm_fallback.get("status") == "ok" else "warning",
+                        "description": "LLM 兜底分析完成",
+                        "detail": {"fallback_status": llm_fallback.get("status")},
+                    },
+                )
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "finalize",
+                    "status": "completed",
+                    "description": "RCA 分析完成，已生成最终结论",
+                    "detail": {"decision": (result.get("final_decision", {}) or {}).get("decision")},
+                },
+            )
             
         except Exception as e:
             error_trace = traceback.format_exc()
@@ -143,6 +250,15 @@ class MultiAgentOrchestrator:
                 "root_cause_summary": "处理过程中发生错误",
                 "action_plan": "请检查系统日志或人工介入"
             }
+            await self._emit_progress(
+                progress_callback,
+                {
+                    "node": "finalize",
+                    "status": "failed",
+                    "description": "RCA 分析失败",
+                    "detail": {"error": str(e)},
+                },
+            )
         
         end_time = datetime.now()
         result["end_time"] = end_time.isoformat()
@@ -153,6 +269,31 @@ class MultiAgentOrchestrator:
         result["saved_to"] = full_result_file
         
         return result
+
+    async def process_query_with_progress(
+        self,
+        user_query: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
+    ) -> Dict[str, Any]:
+        return await self._process_query(user_query=user_query, progress_callback=progress_callback)
+
+    async def _emit_progress(
+        self,
+        callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]],
+        payload: Dict[str, Any],
+    ) -> None:
+        if callback is None:
+            return
+        event = {
+            "timestamp": datetime.utcnow().isoformat(),
+            **payload,
+        }
+        try:
+            result = callback(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
 
     def _merge_alert_prefetch_into_final_decision(
         self,
@@ -401,6 +542,89 @@ class MultiAgentOrchestrator:
             "success": False,
             "status": "not_found",
             "message": "未从 Loki/Elasticsearch 预采集到相关日志",
+            **self._prefetch_local_uploaded_logs(alert_context, time_range),
+        }
+
+    def _prefetch_local_uploaded_logs(
+        self,
+        alert_context: Dict[str, Any],
+        time_range: List[str],
+    ) -> Dict[str, Any]:
+        service = (alert_context.get("service") or "").lower().strip()
+        instance = (alert_context.get("instance") or "").lower().strip()
+        metric_name = (alert_context.get("metric_name") or "").lower().strip()
+        description = (alert_context.get("description") or "").lower().strip()
+        keywords = [item for item in [service, instance, metric_name] if item]
+        if description:
+            keywords.extend([token for token in re.split(r"[\s,;|]+", description) if len(token) >= 4][:5])
+
+        try:
+            start_dt = datetime.strptime(time_range[0], "%Y-%m-%d %H:%M:%S")
+            end_dt = datetime.strptime(time_range[1], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(minutes=30)
+
+        db = SessionLocal()
+        try:
+            query = db.query(Log).filter(
+                Log.timestamp >= start_dt,
+                Log.timestamp <= end_dt,
+                Log.is_anomaly.is_(True),
+            )
+            rows = query.order_by(Log.timestamp.desc()).limit(60).all()
+        finally:
+            db.close()
+
+        if not rows:
+            return {}
+
+        def _match_score(text: str) -> int:
+            text_lower = text.lower()
+            score = 0
+            for keyword in self.alert_log_keywords:
+                if keyword in text_lower:
+                    score += 2
+            for key in keywords:
+                if key and key in text_lower:
+                    score += 1
+            return score
+
+        scored_logs: List[Dict[str, Any]] = []
+        for row in rows:
+            content = row.content or ""
+            score = _match_score(content)
+            scored_logs.append(
+                {
+                    "timestamp": row.timestamp.isoformat() if row.timestamp else "",
+                    "message": content[:400],
+                    "level": row.level,
+                    "upload_batch_id": row.upload_batch_id,
+                    "score": score,
+                }
+            )
+
+        scored_logs.sort(key=lambda item: item.get("score", 0), reverse=True)
+        top_logs = scored_logs[:20]
+        matched_logs = [item for item in top_logs if item.get("score", 0) > 0]
+        sample_logs = matched_logs[:5] if matched_logs else top_logs[:5]
+        avg_score = (
+            round(sum(item.get("score", 0) for item in sample_logs) / max(1, len(sample_logs)), 2)
+            if sample_logs else 0
+        )
+
+        status = "matched" if matched_logs else "weak_matched"
+        return {
+            "success": True,
+            "source_type": "uploaded_logs",
+            "total_logs": len(rows),
+            "status": status,
+            "match_score": avg_score,
+            "matched_keywords": keywords[:8],
+            "matched_fields": [field for field in ["service", "instance", "metric", "description"] if alert_context.get(field if field != "metric" else "metric_name")],
+            "sample_messages": [item.get("message", "") for item in sample_logs if item.get("message")],
+            "sample_logs": sample_logs,
+            "message": f"已从上传日志中预采集到 {len(rows)} 条异常日志（时间窗口内）。",
         }
 
     def _has_meaningful_logs(self, result: Dict[str, Any]) -> bool:
@@ -897,6 +1121,152 @@ class MultiAgentOrchestrator:
         )
         
         return observability_result
+
+    def _is_knowledge_unavailable(self, extra_context: Dict[str, Any]) -> bool:
+        knowledge_context = extra_context.get("knowledge_context", {}) if isinstance(extra_context, dict) else {}
+        if not isinstance(knowledge_context, dict):
+            return True
+        knowledge_report = str(knowledge_context.get("knowledge_report", "") or "").strip()
+        rag_context = str(knowledge_context.get("rag_context", "") or "").strip()
+        if rag_context:
+            return False
+        if knowledge_report and "知识分析暂时不可用" not in knowledge_report:
+            return False
+        warnings = knowledge_context.get("warnings", [])
+        warning_codes = {item.get("code") for item in warnings if isinstance(item, dict)}
+        return bool({"RAG_UNAVAILABLE", "KG_DEGRADED", "KNOWLEDGE_ANALYSIS_DEGRADED"} & warning_codes)
+
+    def _is_log_unavailable(self, extra_context: Dict[str, Any]) -> bool:
+        if not isinstance(extra_context, dict):
+            return True
+        log_evidence = extra_context.get("log_evidence_prefetch", {})
+        if not isinstance(log_evidence, dict):
+            return True
+        return log_evidence.get("status") in {"not_found", "not_available", None, ""}
+
+    def _should_use_llm_fallback(self, final_decision: Dict[str, Any], extra_context: Dict[str, Any] | None) -> bool:
+        if not isinstance(final_decision, dict):
+            return False
+        if not isinstance(extra_context, dict):
+            return False
+        has_root_cause = bool(str(final_decision.get("root_cause_summary", "") or "").strip())
+        if has_root_cause:
+            return False
+        knowledge_unavailable = self._is_knowledge_unavailable(extra_context)
+        log_unavailable = self._is_log_unavailable(extra_context)
+        return knowledge_unavailable and log_unavailable
+
+    async def _stage_llm_fallback_analysis(
+        self,
+        user_query: str,
+        intent_data: Dict[str, Any],
+        extra_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        prompt_payload = {
+            "query": user_query,
+            "intent": intent_data,
+            "alert_context": extra_context.get("alert_context", {}),
+            "metrics_evidence": extra_context.get("metrics_evidence", {}),
+            "log_evidence_prefetch": extra_context.get("log_evidence_prefetch", {}),
+            "trace_evidence": extra_context.get("trace_evidence", {}),
+            "knowledge_context": extra_context.get("knowledge_context", {}),
+        }
+
+        prompt = (
+            "你是AIOps根因分析助手。当前知识图谱/RAG/日志证据不足，请基于已有上下文给出保守但可执行的根因推断。\n"
+            "要求：\n"
+            "1) 结论必须是低到中等置信度，并明确假设条件；\n"
+            "2) 优先给出可立即执行的排查步骤；\n"
+            "3) 仅输出 JSON，不要 Markdown。\n"
+            "JSON Schema:\n"
+            "{"
+            "\"root_cause_summary\":\"string\","
+            "\"possible_causes\":[\"string\"],"
+            "\"action_plan\":\"string\","
+            "\"confidence\":\"LOW|MEDIUM\""
+            "}\n"
+            f"上下文: {json.dumps(prompt_payload, ensure_ascii=False)[:12000]}"
+        )
+
+        try:
+            client, llm_config = llm_config_manager.get_client_for_scene("knowledge_analysis")
+            response = client.chat.completions.create(
+                model=llm_config.model,
+                messages=[
+                    {"role": "system", "content": "你输出严格 JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=min(0.4, max(0.1, float(llm_config.temperature or 0.2))),
+            )
+            raw_content = ""
+            if getattr(response, "choices", None):
+                message = response.choices[0].message
+                raw_content = str(getattr(message, "content", "") or "").strip()
+
+            parsed = self._parse_json_payload(raw_content)
+            if not parsed:
+                raise ValueError(f"LLM fallback output not JSON: {raw_content[:200]}")
+
+            return {
+                "status": "ok",
+                "summary": str(parsed.get("root_cause_summary", "") or "").strip(),
+                "possible_causes": parsed.get("possible_causes", []),
+                "action_plan": str(parsed.get("action_plan", "") or "").strip(),
+                "confidence": str(parsed.get("confidence", "LOW") or "LOW").upper(),
+                "raw": raw_content[:1000],
+            }
+        except Exception as exc:
+            logger.warning(f"LLM fallback analysis failed: {exc}")
+            return {
+                "status": "fallback_rule",
+                "summary": "现有知识图谱、RAG 与日志证据不足，初步判断为瞬时负载抖动或下游依赖波动导致的告警。",
+                "possible_causes": [
+                    "依赖服务短时超时/抖动",
+                    "应用实例资源竞争导致响应变慢",
+                    "告警阈值偏紧导致误报",
+                ],
+                "action_plan": "先核查告警时间窗内的服务健康与依赖链路，再补充日志源后重跑 RCA。",
+                "confidence": "LOW",
+                "raw": str(exc),
+            }
+
+    def _parse_json_payload(self, content: str) -> Dict[str, Any]:
+        text = (content or "").strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            return {}
+        try:
+            payload = json.loads(match.group(0))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _merge_llm_fallback_decision(self, final_decision: Dict[str, Any], llm_fallback: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(final_decision or {})
+        if not isinstance(llm_fallback, dict):
+            return merged
+        summary = str(llm_fallback.get("summary", "") or "").strip()
+        if summary:
+            merged["root_cause_summary"] = summary
+
+        if llm_fallback.get("action_plan"):
+            merged["action_plan"] = llm_fallback.get("action_plan")
+        if llm_fallback.get("confidence"):
+            merged["confidence"] = llm_fallback.get("confidence")
+        if llm_fallback.get("possible_causes"):
+            merged["possible_causes"] = llm_fallback.get("possible_causes")
+        merged["analysis_mode"] = "llm_fallback" if llm_fallback.get("status") == "ok" else "rule_fallback"
+        merged.setdefault("decision", "MANUAL_INTERVENTION")
+        merged.setdefault("reason", "证据不足，已使用 LLM 兜底分析")
+        return merged
     
     def _extract_related_services(self, topology_info: Dict) -> List[str]:
         """
