@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Typography, Upload, Button, Alert, Space, message, Statistic, Row, Col, Progress, List, Tag, Modal, InputNumber, Popconfirm } from 'antd';
+import { Card, Typography, Upload, Button, Alert, Space, message, Statistic, Row, Col, Progress, List, Tag, Modal, InputNumber, Popconfirm, Collapse } from 'antd';
 import { InboxOutlined, UploadOutlined, FileTextOutlined, ReloadOutlined, HistoryOutlined } from '@ant-design/icons';
 import type { UploadProps } from 'antd';
 import { useNavigate } from 'react-router-dom';
@@ -13,6 +13,13 @@ const MAX_HISTORY_COUNT = 12;
 
 type UploadHistoryRecord = LogUploadResult & {
   id: string;
+};
+
+const toRecord = (value: unknown): Record<string, unknown> => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
 };
 
 const LogUpload = () => {
@@ -41,7 +48,7 @@ const LogUpload = () => {
   const fetchData = async () => {
     setLoadingStats(true);
     try {
-      const statsData = await logsApi.getStats();
+      const statsData = await logsApi.getStats({ uploaded_only: true });
       setStats(statsData);
       message.success('日志统计已刷新');
     } catch (error) {
@@ -133,6 +140,25 @@ const LogUpload = () => {
     .map((item) => (item.impact ? `${item.message}（${item.impact}）` : item.message))
     .filter(Boolean)
     .join('；');
+  const rcaPayload = toRecord(analyzeResult?.rca);
+  const rcaStages = toRecord(rcaPayload.stages);
+  const skillMatchingStage = toRecord(rcaStages.skill_matching);
+  const dynamicExecutionStage = toRecord(rcaStages.dynamic_execution);
+  const alertPrefetchStage = toRecord(rcaStages.alert_prefetch);
+  const metricsEvidence = toRecord(alertPrefetchStage.metrics_evidence);
+  const logsEvidence = toRecord(alertPrefetchStage.log_evidence_prefetch);
+  const traceEvidence = toRecord(alertPrefetchStage.trace_evidence);
+  const durationSeconds = typeof rcaPayload.duration_seconds === 'number' ? rcaPayload.duration_seconds : null;
+  const matchedSkills = Array.isArray(skillMatchingStage.matched_skills)
+    ? skillMatchingStage.matched_skills.filter((item): item is string => typeof item === 'string')
+    : [];
+  const executionHistory = Array.isArray(dynamicExecutionStage.execution_history)
+    ? dynamicExecutionStage.execution_history.map((item) => toRecord(item))
+    : [];
+  const recentTools = executionHistory
+    .map((item) => item.tool)
+    .filter((item): item is string => typeof item === 'string')
+    .slice(0, 8);
 
   const handleDeleteBatch = async (batchId: string) => {
     setDeletingBatchId(batchId);
@@ -349,6 +375,43 @@ const LogUpload = () => {
                       description={analyzeWarningText}
                     />
                   )}
+                  <Collapse
+                    size="small"
+                    items={[
+                      {
+                        key: 'rca-process',
+                        label: '查看分析过程明细',
+                        children: (
+                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                            <Text>总耗时：{durationSeconds !== null ? `${durationSeconds.toFixed(2)} 秒` : '-'}</Text>
+                            <Text>动态执行状态：{String(dynamicExecutionStage.status || '-')}</Text>
+                            <Text>执行迭代次数：{executionHistory.length}</Text>
+                            <Text>预采集状态：metrics={String(metricsEvidence.status || '-')} / logs={String(logsEvidence.status || '-')} / trace={String(traceEvidence.status || '-')}</Text>
+                            <Text>命中技能：</Text>
+                            {matchedSkills.length > 0 ? (
+                              <Space size={[4, 6]} wrap>
+                                {matchedSkills.map((skill) => (
+                                  <Tag key={skill} color="blue">{skill}</Tag>
+                                ))}
+                              </Space>
+                            ) : (
+                              <Text type="secondary">无</Text>
+                            )}
+                            <Text>执行过的工具：</Text>
+                            {recentTools.length > 0 ? (
+                              <Space size={[4, 6]} wrap>
+                                {recentTools.map((tool, index) => (
+                                  <Tag key={`${tool}-${index}`}>{tool}</Tag>
+                                ))}
+                              </Space>
+                            ) : (
+                              <Text type="secondary">无</Text>
+                            )}
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
                 </Space>
               </Card>
             )}

@@ -102,7 +102,7 @@ export const userApi = {
 };
 
 export const logsApi = {
-  getLogs: async (params?: { level?: string; is_anomaly?: boolean; limit?: number; offset?: number }): Promise<Log[]> => {
+  getLogs: async (params?: { level?: string; is_anomaly?: boolean; uploaded_only?: boolean; limit?: number; offset?: number }): Promise<Log[]> => {
     const response = await api.get('/logs', { params });
     return response.data;
   },
@@ -113,6 +113,7 @@ export const logsApi = {
     level?: string;
     levels?: string;
     service?: string;
+    uploaded_only?: boolean;
     start_time?: string;
     end_time?: string;
     incident_only?: boolean;
@@ -152,8 +153,8 @@ export const logsApi = {
     return response.data;
   },
 
-  getStats: async (): Promise<LogStats> => {
-    const response = await api.get('/logs/stats');
+  getStats: async (params?: { uploaded_only?: boolean }): Promise<LogStats> => {
+    const response = await api.get('/logs/stats', { params });
     return response.data;
   },
 

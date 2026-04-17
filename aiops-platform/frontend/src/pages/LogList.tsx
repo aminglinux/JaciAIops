@@ -21,12 +21,14 @@ const LogList = () => {
   const [serviceFilter, setServiceFilter] = useState('');
   const [timeRange, setTimeRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [incidentOnly, setIncidentOnly] = useState(false);
+  const [uploadedOnly, setUploadedOnly] = useState(false);
   const [queryState, setQueryState] = useState({
     sourceType: 'local',
     level: undefined as string | undefined,
     levels: undefined as string | undefined,
     keyword: '',
     service: '',
+    uploadedOnly: false,
     startTime: undefined as string | undefined,
     endTime: undefined as string | undefined,
     incidentOnly: false,
@@ -42,6 +44,7 @@ const LogList = () => {
         level: queryState.level,
         levels: queryState.levels,
         service: queryState.service || undefined,
+        uploaded_only: queryState.sourceType === 'local' ? queryState.uploadedOnly : false,
         start_time: queryState.startTime,
         end_time: queryState.endTime,
         incident_only: queryState.incidentOnly,
@@ -70,13 +73,15 @@ const LogList = () => {
     const service = params.get('service');
     const incident = params.get('incident');
     const minutes = params.get('minutes');
+    const uploaded = params.get('uploaded');
 
-    if (!source && !service && !incident && !minutes) {
+    if (!source && !service && !incident && !minutes && !uploaded) {
       return;
     }
 
     const nextIncidentOnly = incident === '1' || incident === 'true';
     const nextSourceType = source || 'local';
+    const nextUploadedOnly = uploaded === '1' || uploaded === 'true';
     const nextService = service || '';
     const nextMinutes = Number(minutes || 30);
     const nextTimeRange = nextIncidentOnly
@@ -86,6 +91,7 @@ const LogList = () => {
     setSourceType(nextSourceType);
     setServiceFilter(nextService);
     setIncidentOnly(nextIncidentOnly);
+    setUploadedOnly(nextSourceType === 'local' ? nextUploadedOnly : false);
     setLevelFilter(undefined);
     setTimeRange(nextTimeRange);
     setPagination((prev) => ({ ...prev, current: 1, total: 0 }));
@@ -95,6 +101,7 @@ const LogList = () => {
       levels: nextIncidentOnly ? 'ERROR,WARN' : undefined,
       keyword: '',
       service: nextService,
+      uploadedOnly: nextSourceType === 'local' ? nextUploadedOnly : false,
       startTime: nextTimeRange?.[0]?.toISOString(),
       endTime: nextTimeRange?.[1]?.toISOString(),
       incidentOnly: nextIncidentOnly,
@@ -121,6 +128,7 @@ const LogList = () => {
       levels: incidentOnly ? 'ERROR,WARN' : undefined,
       keyword: keywordFilter.trim(),
       service: serviceFilter.trim(),
+      uploadedOnly: sourceType === 'local' ? uploadedOnly : false,
       startTime: effectiveTimeRange?.[0]?.toISOString(),
       endTime: effectiveTimeRange?.[1]?.toISOString(),
       incidentOnly,
@@ -326,6 +334,12 @@ const LogList = () => {
             <Switch checked={incidentOnly} onChange={setIncidentOnly} />
             <Text>仅看故障日志</Text>
           </Space>
+          {isLocalSource && (
+            <Space size={4}>
+              <Switch checked={uploadedOnly} onChange={setUploadedOnly} />
+              <Text>仅看上传日志</Text>
+            </Space>
+          )}
           <Button
             type="primary"
             icon={<ReloadOutlined />}

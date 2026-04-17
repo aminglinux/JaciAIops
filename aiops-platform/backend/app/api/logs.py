@@ -643,11 +643,14 @@ async def ingest_log(log_data: LogCreate, db: Session = Depends(get_db)):
 async def get_logs(
     level: Optional[str] = None,
     is_anomaly: Optional[bool] = None,
+    uploaded_only: bool = False,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
     query = db.query(Log)
+    if uploaded_only:
+        query = query.filter(Log.source == "file")
     
     if level:
         query = query.filter(Log.level == level)
@@ -674,6 +677,7 @@ async def get_logs(
 @router.get("/query", response_model=List[UnifiedLogResponse])
 async def query_logs(
     source_type: str = "local",
+    uploaded_only: bool = False,
     keyword: Optional[str] = None,
     level: Optional[str] = None,
     levels: Optional[str] = None,
@@ -695,6 +699,8 @@ async def query_logs(
 
     if normalized_source == "local":
         query = db.query(Log)
+        if uploaded_only:
+            query = query.filter(Log.source == "file")
         if normalized_levels:
             query = query.filter(Log.level.in_(normalized_levels))
         elif level:
@@ -852,16 +858,23 @@ async def submit_feedback(log_id: int, feedback: FeedbackRequest, db: Session = 
     return {"message": "反馈已记录", "log_id": log_id}
 
 @router.get("/stats", response_model=StatsResponse)
-async def get_stats(db: Session = Depends(get_db)):
-    total = db.query(Log).count()
-    anomaly_count = db.query(Log).filter(Log.is_anomaly == True).count()
+async def get_stats(
+    uploaded_only: bool = False,
+    db: Session = Depends(get_db),
+):
+    base_query = db.query(Log)
+    if uploaded_only:
+        base_query = base_query.filter(Log.source == "file")
+
+    total = base_query.count()
+    anomaly_count = base_query.filter(Log.is_anomaly == True).count()
     
     level_counts = {}
     for level in ["ERROR", "WARN", "INFO", "DEBUG"]:
-        count = db.query(Log).filter(Log.level == level).count()
+        count = base_query.filter(Log.level == level).count()
         level_counts[level] = count
     
-    anomaly_logs = db.query(Log).filter(Log.is_anomaly == True).limit(5).all()
+    anomaly_logs = base_query.filter(Log.is_anomaly == True).limit(5).all()
     top_patterns = [
         {"content": log.content[:50], "score": log.anomaly_score}
         for log in anomaly_logs
