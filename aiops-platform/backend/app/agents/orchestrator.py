@@ -116,7 +116,11 @@ class MultiAgentOrchestrator:
                         "description": "开始告警上下文预采集（KG/指标/日志/链路）",
                     },
                 )
-                extra_context = await self._stage_alert_rca_prefetch(user_query, intent_data)
+                extra_context = await self._stage_alert_rca_prefetch_with_progress(
+                    user_query=user_query,
+                    intent_data=intent_data,
+                    progress_callback=progress_callback,
+                )
                 result["stages"]["alert_prefetch"] = extra_context
                 await self._emit_progress(
                     progress_callback,
@@ -421,6 +425,18 @@ class MultiAgentOrchestrator:
         ]
 
     async def _stage_alert_rca_prefetch(self, user_query: str, intent_data: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._stage_alert_rca_prefetch_with_progress(
+            user_query=user_query,
+            intent_data=intent_data,
+            progress_callback=None,
+        )
+
+    async def _stage_alert_rca_prefetch_with_progress(
+        self,
+        user_query: str,
+        intent_data: Dict[str, Any],
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
+    ) -> Dict[str, Any]:
         alert_context = self._extract_alert_context(user_query, intent_data)
         time_range = self._build_alert_time_range(
             alert_context.get("alert_time", ""),
@@ -435,13 +451,75 @@ class MultiAgentOrchestrator:
             for item in data_sources_info.get("data_sources", [])
             if isinstance(item, dict)
         }
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "prefetch_sources",
+                "status": "completed",
+                "description": "已检查可用数据源",
+                "detail": {"available_sources": available_sources},
+            },
+        )
 
         symptoms = intent_data.get("entities", {}).get("symptoms", []) if isinstance(intent_data, dict) else []
         knowledge_context = await self._stage_knowledge_query(service, symptoms, intent_data.get("entities", {}))
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "prefetch_knowledge",
+                "status": "completed",
+                "description": "知识图谱/RAG 预采集完成",
+                "detail": {
+                    "service": service,
+                    "rag_available": bool(str(knowledge_context.get("rag_context", "") or "").strip()),
+                    "warnings": knowledge_context.get("warnings", []),
+                },
+            },
+        )
 
         metrics_data = await self._prefetch_alert_metrics(service, available_sources)
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "prefetch_metrics",
+                "status": "completed" if metrics_data.get("success") else "warning",
+                "description": "指标预采集完成",
+                "detail": {
+                    "status": metrics_data.get("status"),
+                    "source_type": metrics_data.get("source_type"),
+                    "message": metrics_data.get("message"),
+                },
+            },
+        )
         logs_data = await self._prefetch_alert_logs(alert_context, time_range, available_sources)
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "prefetch_logs",
+                "status": "completed" if logs_data.get("success") else "warning",
+                "description": "日志预采集完成",
+                "detail": {
+                    "status": logs_data.get("status"),
+                    "source_type": logs_data.get("source_type"),
+                    "match_score": logs_data.get("match_score"),
+                    "sample_messages": (logs_data.get("sample_messages") or [])[:3],
+                },
+            },
+        )
         traces_data = await self._prefetch_alert_traces(service, available_sources)
+        await self._emit_progress(
+            progress_callback,
+            {
+                "node": "prefetch_traces",
+                "status": "completed" if traces_data.get("success") else "warning",
+                "description": "链路预采集完成",
+                "detail": {
+                    "status": traces_data.get("status"),
+                    "source_type": traces_data.get("source_type"),
+                    "message": traces_data.get("message"),
+                },
+            },
+        )
 
         return {
             "mode": "alert_prefetch_pipeline",

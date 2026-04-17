@@ -16,6 +16,7 @@ import {
 import Dashboard from './pages/Dashboard';
 import LogList from './pages/LogList';
 import LogUpload from './pages/LogUpload';
+import LogAnomalyAnalysis from './pages/LogAnomalyAnalysis';
 import LogSettings from './pages/LogSettings';
 import Diagnose from './pages/Diagnose';
 import AlertCenter from './pages/AlertCenter';
@@ -59,6 +60,7 @@ const menuItems: MenuItemConfig[] = [
     children: [
       { key: '/logs', label: '日志查询', path: '/logs', permission: 'logs:view' },
       { key: '/logs/upload', label: '日志上传', path: '/logs/upload', permission: 'logs:view' },
+      { key: '/logs/anomaly-analysis', label: '异常分析', path: '/logs/anomaly-analysis', permission: 'logs:view' },
       { key: '/logs/settings', label: '日志配置', path: '/logs/settings', adminOnly: true },
     ],
   },
@@ -234,6 +236,11 @@ const AppContent = () => {
               <Route path="/logs/upload" element={
                 <PrivateRoute requiredPermission="logs:view">
                   <LogUpload />
+                </PrivateRoute>
+              } />
+              <Route path="/logs/anomaly-analysis" element={
+                <PrivateRoute requiredPermission="logs:view">
+                  <LogAnomalyAnalysis />
                 </PrivateRoute>
               } />
               <Route path="/logs/settings" element={

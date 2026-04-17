@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -372,8 +373,12 @@ async def _run_log_analyze_task(task_id: str, payload: LogAnomalyAnalyzePayload)
             },
         )
 
-        async def _progress_callback(event: Dict[str, Any]) -> None:
-            await _append_log_task_event(task_id, event)
+        current_loop = asyncio.get_running_loop()
+        def _progress_callback(event: Dict[str, Any]) -> None:
+            current_loop.call_soon_threadsafe(
+                asyncio.create_task,
+                _append_log_task_event(task_id, event),
+            )
 
         await _append_log_task_event(
             task_id,
@@ -384,11 +389,12 @@ async def _run_log_analyze_task(task_id: str, payload: LogAnomalyAnalyzePayload)
             },
         )
         result = await asyncio.wait_for(
-            orchestrator.process_query_with_progress(query, progress_callback=_progress_callback),
+            asyncio.to_thread(_run_alert_rca_with_progress_sync, query, _progress_callback),
             timeout=ALERT_ANALYZE_TIMEOUT_SECONDS,
         )
 
-        task_snapshot = deepcopy(_log_analyze_tasks.get(task_id, {}))
+        async with _log_analyze_task_lock:
+            task_snapshot = deepcopy(_log_analyze_tasks.get(task_id, {}))
         result["process_events"] = task_snapshot.get("events", [])
         event = _save_alert_event(db, alert, query, result)
         response = _build_response(alert, query, result, event.id)
@@ -446,6 +452,14 @@ async def _run_log_analyze_task(task_id: str, payload: LogAnomalyAnalyzePayload)
         await _update_log_task(task_id, status="failed", error=str(exc))
     finally:
         db.close()
+
+
+def _run_alert_rca_with_progress_sync(
+    query: str,
+    progress_callback,
+) -> Dict[str, Any]:
+    local_orchestrator = MultiAgentOrchestrator()
+    return asyncio.run(local_orchestrator.process_query_with_progress(query, progress_callback=progress_callback))
 
 
 def _save_alert_event(
@@ -636,6 +650,46 @@ async def get_analyze_from_logs_task(
         if not task:
             raise HTTPException(status_code=404, detail="分析任务不存在或已过期")
         return deepcopy(task)
+
+
+@router.get("/analyze-from-logs/tasks/{task_id}/stream")
+async def stream_analyze_from_logs_task(
+    task_id: str,
+    _: User = Depends(get_current_user),
+):
+    async def event_generator():
+        last_event_index = 0
+        while True:
+            async with _log_analyze_task_lock:
+                task = deepcopy(_log_analyze_tasks.get(task_id))
+            if not task:
+                payload = {"type": "error", "message": "分析任务不存在或已过期"}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return
+
+            events = task.get("events", []) if isinstance(task, dict) else []
+            if last_event_index == 0:
+                yield f"data: {json.dumps({'type': 'meta', 'task_id': task_id, 'status': task.get('status'), 'created_at': task.get('created_at')}, ensure_ascii=False)}\n\n"
+            for event in events[last_event_index:]:
+                yield f"data: {json.dumps({'type': 'event', 'event': event, 'task_id': task_id, 'status': task.get('status')}, ensure_ascii=False)}\n\n"
+            last_event_index = len(events)
+
+            status = task.get("status")
+            if status in {"completed", "failed"}:
+                done_payload = {
+                    "type": "done",
+                    "task_id": task_id,
+                    "status": status,
+                    "error": task.get("error"),
+                    "result": task.get("result"),
+                    "event_id": task.get("event_id"),
+                }
+                yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
+                return
+
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/analyze-from-logs/history")

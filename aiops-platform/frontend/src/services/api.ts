@@ -226,6 +226,69 @@ export const alertsApi = {
     return response.data;
   },
 
+  streamAnalyzeFromLogsTask: async (
+    taskId: string,
+    handlers: {
+      onMeta?: (payload: Record<string, unknown>) => void;
+      onEvent?: (payload: Record<string, unknown>) => void;
+      onDone?: (payload: Record<string, unknown>) => void;
+      onError?: (payload: Record<string, unknown>) => void;
+    },
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`/api/alerts/analyze-from-logs/tasks/${taskId}/stream`, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      throw new Error('stream request failed');
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() || '';
+      for (const chunk of chunks) {
+        const line = chunk
+          .split('\n')
+          .map((item) => item.trim())
+          .find((item) => item.startsWith('data:'));
+        if (!line) {
+          continue;
+        }
+        const jsonText = line.replace(/^data:\s*/, '');
+        try {
+          const payload = JSON.parse(jsonText) as Record<string, unknown>;
+          const payloadType = String(payload.type || '');
+          if (payloadType === 'meta') {
+            handlers.onMeta?.(payload);
+          } else if (payloadType === 'event') {
+            handlers.onEvent?.(payload);
+          } else if (payloadType === 'done') {
+            handlers.onDone?.(payload);
+            return;
+          } else if (payloadType === 'error') {
+            handlers.onError?.(payload);
+            return;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  },
+
   getAnalyzeFromLogsHistory: async (limit: number = 20): Promise<{ history: LogAnalyzeHistoryItem[] }> => {
     const response = await api.get<{ history: LogAnalyzeHistoryItem[] }>('/alerts/analyze-from-logs/history', { params: { limit } });
     return response.data;
