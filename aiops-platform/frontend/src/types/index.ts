@@ -83,6 +83,22 @@ export interface LogSourceConfigPayload {
   loki_url: string;
 }
 
+export interface LogSourceTestResult {
+  success: boolean;
+  message: string;
+  details?: {
+    endpoint?: string | null;
+    clusterName?: string | null;
+    clusterUuid?: string | null;
+    version?: string | null;
+    tagline?: string | null;
+    authenticatedAs?: string | null;
+    labelsCount?: number | null;
+    status?: string | null;
+    sampleLabels?: string | null;
+  };
+}
+
 export interface AgentTask {
   task_id: string;
   user_input?: string;

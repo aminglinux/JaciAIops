@@ -1,16 +1,29 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Form, Input, Select, Space, Switch, Typography, message } from 'antd';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Card, Descriptions, Form, Input, Select, Space, Switch, Tag, Typography, message } from 'antd';
+import type { AxiosError } from 'axios';
 
 import { logsApi } from '../services/api';
-import type { LogSourceConfigPayload } from '../types';
+import type { LogSourceConfigPayload, LogSourceTestResult } from '../types';
 
 const LogSettings = () => {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testingElastic, setTestingElastic] = useState(false);
+  const [testingLoki, setTestingLoki] = useState(false);
   const [passwordMasked, setPasswordMasked] = useState('');
   const [apiKeyMasked, setApiKeyMasked] = useState('');
+  const [elasticResult, setElasticResult] = useState<LogSourceTestResult | null>(null);
+  const [lokiResult, setLokiResult] = useState<LogSourceTestResult | null>(null);
   const authType = Form.useWatch('elasticsearch_auth_type', form);
+
+  const resultTone = useMemo(
+    () => ({
+      elastic: elasticResult?.success ? 'success' : 'error',
+      loki: lokiResult?.success ? 'success' : 'error',
+    }),
+    [elasticResult, lokiResult]
+  );
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -51,6 +64,62 @@ const LogSettings = () => {
       message.error('保存日志源配置失败');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    try {
+      const values = (await form.validateFields()) as LogSourceConfigPayload;
+      setTestingElastic(true);
+      const result = await logsApi.testConfig(values);
+      setElasticResult(result);
+      message.success(result.message);
+    } catch (error) {
+      const axiosError = error as AxiosError<{ detail?: string }>;
+      const detail = axiosError.response?.data?.detail;
+      if (!detail && error instanceof Error && error.message) {
+        message.error(error.message);
+      } else if (detail) {
+        message.error(detail);
+      }
+      if (detail) {
+        setElasticResult({
+          success: false,
+          message: detail,
+        });
+      }
+    } finally {
+      setTestingElastic(false);
+    }
+  };
+
+  const handleTestLokiConnection = async () => {
+    try {
+      const values = (await form.validateFields(['loki_enabled', 'loki_url'])) as Pick<LogSourceConfigPayload, 'loki_enabled' | 'loki_url'>;
+      setTestingLoki(true);
+      const payload = {
+        ...(form.getFieldsValue() as LogSourceConfigPayload),
+        ...values,
+      };
+      const result = await logsApi.testLokiConfig(payload);
+      setLokiResult(result);
+      message.success(result.message);
+    } catch (error) {
+      const axiosError = error as AxiosError<{ detail?: string }>;
+      const detail = axiosError.response?.data?.detail;
+      if (!detail && error instanceof Error && error.message) {
+        message.error(error.message);
+      } else if (detail) {
+        message.error(detail);
+      }
+      if (detail) {
+        setLokiResult({
+          success: false,
+          message: detail,
+        });
+      }
+    } finally {
+      setTestingLoki(false);
     }
   };
 
@@ -146,6 +215,39 @@ const LogSettings = () => {
             >
               <Switch checkedChildren="开启" unCheckedChildren="关闭" />
             </Form.Item>
+            <Space style={{ marginTop: 8 }}>
+              <Button onClick={() => void handleTestConnection()} loading={testingElastic}>
+                测试 Elasticsearch 连接
+              </Button>
+              <Typography.Text type="secondary">会使用当前表单中的地址和认证信息测试，不必先保存。</Typography.Text>
+            </Space>
+            {elasticResult && (
+              <Card
+                size="small"
+                style={{ marginTop: 16, borderRadius: 12 }}
+                bodyStyle={{ padding: 12 }}
+                title={
+                  <Space>
+                    <span>Elasticsearch 测试结果</span>
+                    <Tag color={resultTone.elastic === 'success' ? 'green' : 'red'}>
+                      {elasticResult.success ? '连接成功' : '连接失败'}
+                    </Tag>
+                  </Space>
+                }
+              >
+                <Typography.Paragraph style={{ marginBottom: 12 }}>{elasticResult.message}</Typography.Paragraph>
+                {elasticResult.success && elasticResult.details ? (
+                  <Descriptions size="small" column={1} bordered>
+                    <Descriptions.Item label="集群名称">{elasticResult.details.clusterName || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="版本">{elasticResult.details.version || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="认证方式">{elasticResult.details.authenticatedAs || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="集群 UUID">{elasticResult.details.clusterUuid || '-'}</Descriptions.Item>
+                  </Descriptions>
+                ) : (
+                  <Alert type="error" showIcon message={elasticResult.message} />
+                )}
+              </Card>
+            )}
           </Card>
           <Card size="small" title="Loki" style={{ flex: 1, minWidth: 320 }}>
             <Form.Item label="启用 Loki" name="loki_enabled" valuePropName="checked">
@@ -154,6 +256,39 @@ const LogSettings = () => {
             <Form.Item label="Loki URL" name="loki_url" rules={[{ required: true, message: '请输入 Loki 地址' }]}>
               <Input placeholder="例如 http://localhost:3100" />
             </Form.Item>
+            <Space style={{ marginTop: 8 }}>
+              <Button onClick={() => void handleTestLokiConnection()} loading={testingLoki}>
+                测试 Loki 连接
+              </Button>
+              <Typography.Text type="secondary">会访问 Loki 标签接口验证连通性。</Typography.Text>
+            </Space>
+            {lokiResult && (
+              <Card
+                size="small"
+                style={{ marginTop: 16, borderRadius: 12 }}
+                bodyStyle={{ padding: 12 }}
+                title={
+                  <Space>
+                    <span>Loki 测试结果</span>
+                    <Tag color={resultTone.loki === 'success' ? 'green' : 'red'}>
+                      {lokiResult.success ? '连接成功' : '连接失败'}
+                    </Tag>
+                  </Space>
+                }
+              >
+                <Typography.Paragraph style={{ marginBottom: 12 }}>{lokiResult.message}</Typography.Paragraph>
+                {lokiResult.success && lokiResult.details ? (
+                  <Descriptions size="small" column={1} bordered>
+                    <Descriptions.Item label="地址">{lokiResult.details.endpoint || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="状态">{lokiResult.details.status || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="标签数量">{String(lokiResult.details.labelsCount ?? '-')}</Descriptions.Item>
+                    <Descriptions.Item label="样例标签">{lokiResult.details.sampleLabels || '-'}</Descriptions.Item>
+                  </Descriptions>
+                ) : (
+                  <Alert type="error" showIcon message={lokiResult.message} />
+                )}
+              </Card>
+            )}
           </Card>
         </Space>
         <div style={{ marginTop: 16 }}>

@@ -5,6 +5,7 @@ import type {
   LogStats,
   LogSourceConfig,
   LogSourceConfigPayload,
+  LogSourceTestResult,
   AgentTask,
   DiagnoseRequest,
   DiagnoseResponse,
@@ -143,6 +144,16 @@ export const logsApi = {
   updateConfig: async (payload: LogSourceConfigPayload): Promise<LogSourceConfig> => {
     const response = await api.put<ApiResponse<LogSourceConfig>>('/logs/config', payload);
     return response.data.data;
+  },
+
+  testConfig: async (payload: LogSourceConfigPayload): Promise<LogSourceTestResult> => {
+    const response = await api.post<LogSourceTestResult>('/logs/config/test', payload);
+    return response.data;
+  },
+
+  testLokiConfig: async (payload: LogSourceConfigPayload): Promise<LogSourceTestResult> => {
+    const response = await api.post<LogSourceTestResult>('/logs/config/test-loki', payload);
+    return response.data;
   },
 
   ingestLog: async (log: { level: string; content: string; source?: string }): Promise<Log> => {

@@ -72,6 +72,12 @@ class LogSourceConfigPayload(BaseModel):
     loki_url: str
 
 
+class LogSourceTestResponse(BaseModel):
+    success: bool
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
 INCIDENT_KEYWORDS = ["error", "exception", "fail", "failed", "timeout", "refused", "panic", "oom", "fatal"]
 
 
@@ -119,6 +125,42 @@ def _build_local_log_response(log: Log) -> UnifiedLogResponse:
         user_feedback=log.user_feedback,
         raw=None,
     )
+
+
+def _resolve_elasticsearch_connection_config(payload: LogSourceConfigPayload) -> Dict[str, Any]:
+    saved_config = log_source_config_manager.get_effective_config()
+    auth_type = (payload.elasticsearch_auth_type or "none").strip() or "none"
+    username = (payload.elasticsearch_username or "").strip()
+    password = payload.elasticsearch_password or ""
+    api_key = payload.elasticsearch_api_key or ""
+
+    if auth_type == "basic":
+        if not username:
+            username = str(saved_config.get("elasticsearchUsername", "") or "")
+        if not password and str(saved_config.get("elasticsearchAuthType", "")) == "basic":
+            password = str(saved_config.get("elasticsearchPassword", "") or "")
+    elif auth_type == "api_key":
+        if not api_key and str(saved_config.get("elasticsearchAuthType", "")) == "api_key":
+            api_key = str(saved_config.get("elasticsearchApiKey", "") or "")
+    else:
+        username = ""
+        password = ""
+        api_key = ""
+
+    return {
+        "base_url": str(payload.elasticsearch_url).rstrip("/"),
+        "auth_type": auth_type,
+        "username": username,
+        "password": password,
+        "api_key": api_key,
+        "tls_verify": bool(payload.elasticsearch_tls_verify),
+    }
+
+
+def _resolve_loki_connection_config(payload: LogSourceConfigPayload) -> Dict[str, Any]:
+    return {
+        "base_url": str(payload.loki_url).rstrip("/"),
+    }
 
 
 async def _query_elasticsearch_logs(
@@ -516,6 +558,85 @@ def update_log_source_config(
         return {"code": 200, "message": "更新成功", "data": result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/config/test", response_model=LogSourceTestResponse)
+async def test_elasticsearch_log_source_config(
+    payload: LogSourceConfigPayload,
+    current_user: User = Depends(require_admin),
+):
+    _ = current_user
+    connection_config = _resolve_elasticsearch_connection_config(payload)
+    headers: Dict[str, str] = {}
+    auth = None
+
+    if connection_config["auth_type"] == "basic":
+        if not connection_config["username"] or not connection_config["password"]:
+            raise HTTPException(status_code=400, detail="Basic Auth 缺少用户名或密码")
+        auth = (connection_config["username"], connection_config["password"])
+    elif connection_config["auth_type"] == "api_key":
+        if not connection_config["api_key"]:
+            raise HTTPException(status_code=400, detail="API Key 不能为空")
+        headers["Authorization"] = f"ApiKey {connection_config['api_key']}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=connection_config["tls_verify"]) as client:
+            response = await client.get(f"{connection_config['base_url']}/", headers=headers, auth=auth)
+            response.raise_for_status()
+            body = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = f"连接失败：HTTP {exc.response.status_code}"
+        try:
+            response_body = exc.response.json()
+            if isinstance(response_body, dict) and response_body.get("error"):
+                detail = f"{detail}，{response_body.get('error')}"
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=400, detail=f"连接失败：{exc}") from exc
+
+    version = body.get("version", {}) if isinstance(body, dict) else {}
+    details = {
+        "clusterName": body.get("cluster_name") if isinstance(body, dict) else None,
+        "clusterUuid": body.get("cluster_uuid") if isinstance(body, dict) else None,
+        "version": version.get("number") if isinstance(version, dict) else None,
+        "tagline": body.get("tagline") if isinstance(body, dict) else None,
+        "authenticatedAs": connection_config["username"] if connection_config["auth_type"] == "basic" else connection_config["auth_type"],
+    }
+    return LogSourceTestResponse(success=True, message="Elasticsearch 连接测试成功", details=details)
+
+
+@router.post("/config/test-loki", response_model=LogSourceTestResponse)
+async def test_loki_log_source_config(
+    payload: LogSourceConfigPayload,
+    current_user: User = Depends(require_admin),
+):
+    _ = current_user
+    connection_config = _resolve_loki_connection_config(payload)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{connection_config['base_url']}/loki/api/v1/labels",
+                params={"start": str(int((datetime.utcnow().timestamp() - 3600) * 1_000_000_000))},
+            )
+            response.raise_for_status()
+            body = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = f"Loki 连接失败：HTTP {exc.response.status_code}"
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=400, detail=f"Loki 连接失败：{exc}") from exc
+
+    labels = body.get("data", []) if isinstance(body, dict) else []
+    details = {
+        "endpoint": connection_config["base_url"],
+        "labelsCount": len(labels) if isinstance(labels, list) else 0,
+        "status": body.get("status") if isinstance(body, dict) else None,
+        "sampleLabels": ", ".join(labels[:6]) if isinstance(labels, list) and labels else None,
+    }
+    return LogSourceTestResponse(success=True, message="Loki 连接测试成功", details=details)
 
 @router.post("/{log_id}/feedback")
 async def submit_feedback(log_id: int, feedback: FeedbackRequest, db: Session = Depends(get_db)):
