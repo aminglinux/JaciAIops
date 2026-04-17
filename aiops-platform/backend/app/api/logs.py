@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
@@ -15,6 +16,7 @@ from app.services import log_source_config_manager
 from algorithm.anomaly_detector import AnomalyDetector
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
+logger = logging.getLogger(__name__)
 
 detector = AnomalyDetector()
 
@@ -163,6 +165,29 @@ def _resolve_loki_connection_config(payload: LogSourceConfigPayload) -> Dict[str
     }
 
 
+def _extract_http_error_detail(response: httpx.Response) -> str:
+    detail = f"HTTP {response.status_code}"
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict):
+        return detail
+
+    error_obj = payload.get("error")
+    if isinstance(error_obj, dict):
+        error_type = error_obj.get("type")
+        reason = error_obj.get("reason")
+        if error_type and reason:
+            return f"{detail}: {error_type} - {reason}"
+        if error_type:
+            return f"{detail}: {error_type}"
+    if isinstance(error_obj, str):
+        return f"{detail}: {error_obj}"
+
+    return detail
+
+
 async def _query_elasticsearch_logs(
     keyword: Optional[str],
     level: Optional[str],
@@ -254,8 +279,30 @@ async def _query_elasticsearch_logs(
             headers["Authorization"] = f"ApiKey {api_key}"
 
     async with httpx.AsyncClient(timeout=20.0, verify=tls_verify) as client:
-        response = await client.post(f"{base_url}/{index_pattern}/_search", json=payload, headers=headers, auth=auth)
-        response.raise_for_status()
+        try:
+            response = await client.post(f"{base_url}/{index_pattern}/_search", json=payload, headers=headers, auth=auth)
+            if response.status_code == 404:
+                response_body = response.json()
+                error_obj = response_body.get("error", {}) if isinstance(response_body, dict) else {}
+                error_type = ""
+                if isinstance(error_obj, dict):
+                    error_type = str(error_obj.get("type") or "")
+                    if not error_type:
+                        root_cause = error_obj.get("root_cause")
+                        if isinstance(root_cause, list) and root_cause:
+                            first_cause = root_cause[0]
+                            if isinstance(first_cause, dict):
+                                error_type = str(first_cause.get("type") or "")
+                if error_type == "index_not_found_exception":
+                    logger.warning("Elasticsearch index not found for pattern '%s', return empty list", index_pattern)
+                    return []
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            upstream_detail = _extract_http_error_detail(exc.response)
+            raise RuntimeError(f"Elasticsearch 请求失败：{upstream_detail}") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Elasticsearch 请求异常：{exc}") from exc
+
         hits = response.json().get("hits", {}).get("hits", [])
 
     results: List[UnifiedLogResponse] = []
@@ -527,12 +574,14 @@ async def query_logs(
         try:
             return await _query_elasticsearch_logs(keyword, level, normalized_levels, service, parsed_start, parsed_end, safe_limit, incident_only)
         except Exception as exc:
+            logger.exception("Elasticsearch query failed")
             raise HTTPException(status_code=502, detail=f"查询 Elasticsearch 日志失败: {exc}") from exc
 
     if normalized_source == "loki":
         try:
             return await _query_loki_logs(keyword, level, normalized_levels, service, parsed_start, parsed_end, safe_limit, incident_only)
         except Exception as exc:
+            logger.exception("Loki query failed")
             raise HTTPException(status_code=502, detail=f"查询 Loki 日志失败: {exc}") from exc
 
     raise HTTPException(status_code=400, detail="不支持的日志来源")
