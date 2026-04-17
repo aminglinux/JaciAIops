@@ -82,6 +82,41 @@ Output Format (纯 JSON):
     "clarification_needed": false
 }}"""
 
+    def _extract_response_text(self, response: Any) -> str:
+        try:
+            choice = response.choices[0]
+            message = choice.message
+        except Exception:
+            return ""
+
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text_value = item.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        parts.append(text_value.strip())
+            if parts:
+                return "\n".join(parts).strip()
+
+        # 兼容工具调用场景：有时 content 为 None，但 arguments 存在
+        tool_calls = getattr(message, "tool_calls", None)
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                function_obj = getattr(tool_call, "function", None)
+                arguments = getattr(function_obj, "arguments", None) if function_obj else None
+                if isinstance(arguments, str) and arguments.strip():
+                    return arguments.strip()
+                if isinstance(tool_call, dict):
+                    function_obj = tool_call.get("function", {})
+                    arguments = function_obj.get("arguments")
+                    if isinstance(arguments, str) and arguments.strip():
+                        return arguments.strip()
+        return ""
+
     async def parse(self, user_input: str) -> IntentResult:
         client, llm_config = llm_config_manager.get_client_for_scene("intent_parse")
         temperature = llm_config.temperature if llm_config.temperature is not None else 0.1
@@ -97,7 +132,7 @@ Output Format (纯 JSON):
                 messages=[{"role": "user", "content": ner_prompt}],
                 temperature=temperature
             )
-            content = response.choices[0].message.content.strip()
+            content = self._extract_response_text(response)
             content = re.sub(r'^```json\s*', '', content)
             content = re.sub(r'\s*```$', '', content)
             try:
@@ -124,7 +159,7 @@ Output Format (纯 JSON):
                 messages=[{"role": "user", "content": intent_prompt}],
                 temperature=temperature
             )
-            content = response.choices[0].message.content.strip()
+            content = self._extract_response_text(response)
             content = re.sub(r'^```json\s*', '', content)
             content = re.sub(r'\s*```$', '', content)
             try:

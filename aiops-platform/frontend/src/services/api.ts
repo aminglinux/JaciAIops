@@ -4,6 +4,9 @@ import type {
   Log,
   LogStats,
   LogUploadResult,
+  UploadBatchSummary,
+  DeleteUploadBatchResult,
+  ClearUploadedLogsResult,
   LogSourceConfig,
   LogSourceConfigPayload,
   LogSourceTestResult,
@@ -126,6 +129,21 @@ export const logsApi = {
     const response = await api.post<LogUploadResult>('/logs/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+    return response.data;
+  },
+
+  listUploadBatches: async (limit: number = 20): Promise<{ batches: UploadBatchSummary[] }> => {
+    const response = await api.get<{ batches: UploadBatchSummary[] }>('/logs/upload-batches', { params: { limit } });
+    return response.data;
+  },
+
+  deleteUploadBatch: async (batchId: string): Promise<DeleteUploadBatchResult> => {
+    const response = await api.delete<DeleteUploadBatchResult>(`/logs/upload-batches/${batchId}`);
+    return response.data;
+  },
+
+  clearUploadedLogs: async (): Promise<ClearUploadedLogsResult> => {
+    const response = await api.delete<ClearUploadedLogsResult>('/logs/upload-batches');
     return response.data;
   },
 

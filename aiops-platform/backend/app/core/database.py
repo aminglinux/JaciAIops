@@ -36,6 +36,8 @@ class Log(Base):
     is_anomaly = Column(Boolean, default=False)
     anomaly_score = Column(Float, nullable=True)
     user_feedback = Column(Boolean, nullable=True)
+    upload_batch_id = Column(String(64), nullable=True, index=True)
+    upload_file_name = Column(String(255), nullable=True)
 
 class Feedback(Base):
     __tablename__ = "feedback"

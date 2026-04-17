@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi import Depends
 import httpx
+from sqlalchemy import case, func, text
 
 from app.core.database import get_db, Log, Feedback
 from app.core.config import settings
@@ -82,9 +84,31 @@ class LogSourceTestResponse(BaseModel):
 class UploadLogResponse(BaseModel):
     message: str
     filename: str
+    batch_id: str
     logs_created: int
     anomaly_count: int
     upload_time: datetime
+
+
+class UploadBatchSummary(BaseModel):
+    batch_id: str
+    filename: str
+    logs_created: int
+    anomaly_count: int
+    first_log_time: Optional[datetime] = None
+    last_log_time: Optional[datetime] = None
+
+
+class DeleteUploadBatchResponse(BaseModel):
+    batch_id: str
+    deleted_logs: int
+    message: str
+
+
+class ClearUploadedLogsResponse(BaseModel):
+    deleted_logs: int
+    deleted_batches: int
+    message: str
 
 
 INCIDENT_KEYWORDS = ["error", "exception", "fail", "failed", "timeout", "refused", "panic", "oom", "fatal"]
@@ -193,6 +217,18 @@ def _extract_http_error_detail(response: httpx.Response) -> str:
         return f"{detail}: {error_obj}"
 
     return detail
+
+
+def _ensure_log_upload_schema(db: Session) -> None:
+    try:
+        columns = {row[1] for row in db.execute(text("PRAGMA table_info(logs)")).fetchall()}
+        if "upload_batch_id" not in columns:
+            db.execute(text("ALTER TABLE logs ADD COLUMN upload_batch_id VARCHAR(64)"))
+        if "upload_file_name" not in columns:
+            db.execute(text("ALTER TABLE logs ADD COLUMN upload_file_name VARCHAR(255)"))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 async def _query_elasticsearch_logs(
@@ -430,7 +466,12 @@ async def _query_loki_logs(
     return results[:limit]
 
 @router.post("/upload", response_model=UploadLogResponse)
-async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_log_file(
+    file: UploadFile = File(...),
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_log_upload_schema(db)
     if not file.filename.endswith(('.log', '.txt')):
         raise HTTPException(status_code=400, detail="只支持 .log 和 .txt 文件")
     
@@ -441,6 +482,7 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
     lines = content.decode('utf-8', errors='ignore').split('\n')
     logs_created = 0
     anomaly_count = 0
+    batch_id = f"upl-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     
     for line in lines:
         line = line.strip()
@@ -464,7 +506,9 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
             content=line[:1000],
             source="file",
             is_anomaly=is_anomaly,
-            anomaly_score=score
+            anomaly_score=score,
+            upload_batch_id=batch_id,
+            upload_file_name=file.filename,
         )
         db.add(log)
         logs_created += 1
@@ -474,10 +518,100 @@ async def upload_log_file(file: UploadFile = File(...), db: Session = Depends(ge
     return {
         "message": f"成功上传 {logs_created} 条日志",
         "filename": file.filename,
+        "batch_id": batch_id,
         "logs_created": logs_created,
         "anomaly_count": anomaly_count,
         "upload_time": datetime.utcnow(),
     }
+
+
+@router.get("/upload-batches")
+async def list_upload_batches(
+    limit: int = 20,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_log_upload_schema(db)
+    safe_limit = min(max(limit, 1), 100)
+
+    batch_rows = (
+        db.query(
+            Log.upload_batch_id.label("batch_id"),
+            func.max(Log.upload_file_name).label("filename"),
+            func.count(Log.id).label("logs_created"),
+            func.sum(case((Log.is_anomaly == True, 1), else_=0)).label("anomaly_count"),
+            func.min(Log.timestamp).label("first_log_time"),
+            func.max(Log.timestamp).label("last_log_time"),
+        )
+        .filter(Log.source == "file")
+        .filter(Log.upload_batch_id.isnot(None))
+        .group_by(Log.upload_batch_id)
+        .order_by(func.max(Log.timestamp).desc())
+        .limit(safe_limit)
+        .all()
+    )
+
+    return {
+        "batches": [
+            UploadBatchSummary(
+                batch_id=str(item.batch_id),
+                filename=str(item.filename or ""),
+                logs_created=int(item.logs_created or 0),
+                anomaly_count=int(item.anomaly_count or 0),
+                first_log_time=item.first_log_time,
+                last_log_time=item.last_log_time,
+            ).model_dump()
+            for item in batch_rows
+        ]
+    }
+
+
+@router.delete("/upload-batches/{batch_id}", response_model=DeleteUploadBatchResponse)
+async def delete_upload_batch(
+    batch_id: str,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ensure_log_upload_schema(db)
+    deleted_logs = (
+        db.query(Log)
+        .filter(Log.source == "file")
+        .filter(Log.upload_batch_id == batch_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return DeleteUploadBatchResponse(
+        batch_id=batch_id,
+        deleted_logs=int(deleted_logs),
+        message=f"已删除批次 {batch_id}，共 {deleted_logs} 条日志",
+    )
+
+
+@router.delete("/upload-batches", response_model=ClearUploadedLogsResponse)
+async def clear_uploaded_logs(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    _ensure_log_upload_schema(db)
+    deleted_batches = (
+        db.query(Log.upload_batch_id)
+        .filter(Log.source == "file")
+        .filter(Log.upload_batch_id.isnot(None))
+        .distinct()
+        .count()
+    )
+    deleted_logs = (
+        db.query(Log)
+        .filter(Log.source == "file")
+        .filter(Log.upload_batch_id.isnot(None))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return ClearUploadedLogsResponse(
+        deleted_logs=int(deleted_logs),
+        deleted_batches=int(deleted_batches),
+        message=f"已清空 {deleted_batches} 个上传批次，共 {deleted_logs} 条日志",
+    )
 
 @router.post("/ingest", response_model=LogResponse)
 async def ingest_log(log_data: LogCreate, db: Session = Depends(get_db)):

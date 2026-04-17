@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user, require_admin
@@ -11,7 +11,11 @@ from app.services import llm_config_manager
 router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 
-class ProviderPayload(BaseModel):
+class LLMApiModel(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+
+class ProviderPayload(LLMApiModel):
     name: str
     provider_code: str
     provider_type: str = "openai_compatible"
@@ -21,7 +25,7 @@ class ProviderPayload(BaseModel):
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ProviderUpdatePayload(BaseModel):
+class ProviderUpdatePayload(LLMApiModel):
     name: Optional[str] = None
     provider_type: Optional[str] = None
     base_url: Optional[str] = None
@@ -30,7 +34,7 @@ class ProviderUpdatePayload(BaseModel):
     extra_config: Optional[Dict[str, Any]] = None
 
 
-class ModelPayload(BaseModel):
+class ModelPayload(LLMApiModel):
     provider_id: int
     model_id: str
     display_name: str
@@ -45,7 +49,7 @@ class ModelPayload(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ModelUpdatePayload(BaseModel):
+class ModelUpdatePayload(LLMApiModel):
     display_name: Optional[str] = None
     model_type: Optional[str] = None
     supports_function_calling: Optional[bool] = None
@@ -58,7 +62,7 @@ class ModelUpdatePayload(BaseModel):
     meta: Optional[Dict[str, Any]] = None
 
 
-class BindingPayload(BaseModel):
+class BindingPayload(LLMApiModel):
     model_id: int
     temperature: Optional[float] = 0.2
     max_tokens: Optional[int] = None
@@ -66,7 +70,7 @@ class BindingPayload(BaseModel):
     enabled: bool = True
 
 
-class SyncModelsPayload(BaseModel):
+class SyncModelsPayload(LLMApiModel):
     model_ids: Optional[List[str]] = None
     overwrite_existing: bool = False
 
@@ -255,4 +259,3 @@ def update_binding(
 @router.get("/runtime-config", response_model=dict)
 def get_runtime_config(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"code": 200, "message": "success", "data": llm_config_manager.get_runtime_config_summary(db)}
-

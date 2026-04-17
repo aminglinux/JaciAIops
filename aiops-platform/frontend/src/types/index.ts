@@ -58,9 +58,31 @@ export interface LogStats {
 export interface LogUploadResult {
   message: string;
   filename: string;
+  batch_id: string;
   logs_created: number;
   anomaly_count: number;
   upload_time: string;
+}
+
+export interface UploadBatchSummary {
+  batch_id: string;
+  filename: string;
+  logs_created: number;
+  anomaly_count: number;
+  first_log_time?: string | null;
+  last_log_time?: string | null;
+}
+
+export interface DeleteUploadBatchResult {
+  batch_id: string;
+  deleted_logs: number;
+  message: string;
+}
+
+export interface ClearUploadedLogsResult {
+  deleted_logs: number;
+  deleted_batches: number;
+  message: string;
 }
 
 export interface LogSourceConfig {
