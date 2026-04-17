@@ -193,6 +193,24 @@ const LogAnomalyAnalysis = () => {
       message.info('当前没有异常日志，无需触发 RCA');
       return;
     }
+    streamAbortRef.current?.abort();
+    activeStreamTaskIdRef.current = null;
+    setCurrentTaskId(null);
+    setCurrentTaskStatus({
+      task_id: '',
+      status: 'queued',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      params: {
+        lookback_minutes: analyzeParams.lookbackMinutes,
+        max_logs: analyzeParams.maxLogs,
+      },
+      events: [],
+      result: null,
+      error: null,
+      event_id: null,
+    });
+    setProcessModalOpen(true);
     setAnalyzingAnomaly(true);
     try {
       const start = await alertsApi.startAnalyzeFromLogs({
@@ -201,7 +219,6 @@ const LogAnomalyAnalysis = () => {
       });
       setAnalyzeResult(null);
       setCurrentTaskId(start.task_id);
-      setProcessModalOpen(true);
       message.success(start.message || '已触发异常日志 RCA 工作流');
       void startTaskStream(start.task_id);
     } catch (error) {
