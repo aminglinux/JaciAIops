@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import asyncio
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,7 +29,7 @@ MAX_TOPOLOGY_DEPTH = 2
 
 _neo4j_driver = None
 _neo4j_driver_lock = threading.Lock()
-_deep_orchestrator = MultiAgentOrchestrator()
+DEEP_DIAGNOSE_TIMEOUT_SECONDS = 180
 
 class KGQueryRequest(BaseModel):
     query: str
@@ -97,6 +98,11 @@ class ChatRequest(BaseModel):
 class DeepDiagnoseRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+
+
+def _run_deep_diagnose_sync(question: str) -> Dict[str, Any]:
+    local_orchestrator = MultiAgentOrchestrator()
+    return asyncio.run(local_orchestrator.process_query(question))
 
 
 ALLOWED_NODE_TYPES = {
@@ -1062,6 +1068,7 @@ async def chat_with_knowledge_stream(request: ChatRequest, current_user: User = 
 @router.post("/qa/deep-diagnose")
 async def deep_diagnose_with_session(request: DeepDiagnoseRequest, current_user: User = Depends(get_current_user)):
     chat_session = None
+    session_identifier = request.session_id
     prepare_db = SessionLocal()
     try:
         chat_session = _get_or_create_chat_session(
@@ -1071,12 +1078,36 @@ async def deep_diagnose_with_session(request: DeepDiagnoseRequest, current_user:
             request.question,
             True,
         )
+        session_identifier = chat_session.session_id
         _save_chat_message(prepare_db, chat_session, "user", request.question)
     finally:
         prepare_db.close()
 
     try:
-        orchestration_result = await _deep_orchestrator.process_query(request.question)
+        orchestration_result = await asyncio.wait_for(
+            asyncio.to_thread(_run_deep_diagnose_sync, request.question),
+            timeout=DEEP_DIAGNOSE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("deep_diagnose_with_session timeout after %ss", DEEP_DIAGNOSE_TIMEOUT_SECONDS)
+        orchestration_result = {
+            "error": f"deep diagnose timeout after {DEEP_DIAGNOSE_TIMEOUT_SECONDS}s",
+            "warnings": [
+                {
+                    "code": "DEEP_DIAGNOSE_TIMEOUT",
+                    "message": f"深度诊断执行超时（>{DEEP_DIAGNOSE_TIMEOUT_SECONDS}s）。",
+                    "impact": "本次未获得多Agent完整诊断结论",
+                }
+            ],
+            "stages": {},
+            "final_decision": {
+                "decision": "TIMEOUT",
+                "root_cause_summary": "深度诊断超时",
+                "action_plan": "建议缩小问题范围或检查模型/数据源可用性后重试",
+            },
+            "duration_seconds": DEEP_DIAGNOSE_TIMEOUT_SECONDS,
+            "mode": "deep_analysis",
+        }
     except Exception as exc:
         logger.exception("deep_diagnose_with_session failed: %s", exc)
         orchestration_result = {
@@ -1175,7 +1206,7 @@ async def deep_diagnose_with_session(request: DeepDiagnoseRequest, current_user:
         persisted_session = _get_or_create_chat_session(
             save_db,
             current_user,
-            chat_session.session_id if chat_session else request.session_id,
+            session_identifier,
             request.question,
             True,
         )
@@ -1193,7 +1224,7 @@ async def deep_diagnose_with_session(request: DeepDiagnoseRequest, current_user:
         save_db.close()
 
     return {
-        "session_id": chat_session.session_id if chat_session else request.session_id,
+        "session_id": session_identifier,
         "mode": "deep_analysis",
         "intent": assistant_intent,
         "knowledge": assistant_knowledge,

@@ -28,6 +28,12 @@ class MultiAgentResponse(BaseModel):
     duration_seconds: float
 
 orchestrator = MultiAgentOrchestrator()
+MULTI_AGENT_TIMEOUT_SECONDS = 180
+
+
+def _run_multi_agent_query_sync(query: str) -> Dict[str, Any]:
+    local_orchestrator = MultiAgentOrchestrator()
+    return asyncio.run(local_orchestrator.process_query(query))
 
 @router.post("/process", response_model=MultiAgentResponse)
 async def process_multi_agent_query(request: MultiAgentRequest):
@@ -42,8 +48,13 @@ async def process_multi_agent_query(request: MultiAgentRequest):
     5. ActionExecuteAgent: 执行修复操作（如果需要）
     """
     try:
-        result = await orchestrator.process_query(request.query)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_multi_agent_query_sync, request.query),
+            timeout=MULTI_AGENT_TIMEOUT_SECONDS,
+        )
         return MultiAgentResponse(**result)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"多Agent诊断超时（>{MULTI_AGENT_TIMEOUT_SECONDS}s）")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"处理查询时发生错误: {str(e)}")
 
