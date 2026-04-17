@@ -5,7 +5,7 @@ import type { UploadProps } from 'antd';
 import { useNavigate } from 'react-router-dom';
 
 import { alertsApi, logsApi } from '../services/api';
-import type { AlertFinalDecision, LogAnomalyAnalyzeResult, LogStats, LogUploadResult, UploadBatchSummary } from '../types';
+import type { AlertFinalDecision, AnalysisWarning, LogAnomalyAnalyzeResult, LogStats, LogUploadResult, UploadBatchSummary } from '../types';
 
 const { Title, Paragraph, Text } = Typography;
 const HISTORY_STORAGE_KEY = 'log_upload_history_v1';
@@ -128,6 +128,11 @@ const LogUpload = () => {
   };
 
   const decision = (analyzeResult?.final_decision || null) as AlertFinalDecision | null;
+  const analyzeWarnings = (analyzeResult?.warnings || []) as AnalysisWarning[];
+  const analyzeWarningText = analyzeWarnings
+    .map((item) => (item.impact ? `${item.message}（${item.impact}）` : item.message))
+    .filter(Boolean)
+    .join('；');
 
   const handleDeleteBatch = async (batchId: string) => {
     setDeletingBatchId(batchId);
@@ -335,6 +340,14 @@ const LogUpload = () => {
                   )}
                   {decision?.recommendation && (
                     <Alert type="success" showIcon message="建议动作" description={decision.recommendation} />
+                  )}
+                  {analyzeWarnings.length > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="分析已降级（部分依赖不可用）"
+                      description={analyzeWarningText}
+                    />
                   )}
                 </Space>
               </Card>

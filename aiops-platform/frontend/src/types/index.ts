@@ -297,6 +297,7 @@ export interface AlertAnalysisResult {
   query: string;
   rca: Record<string, unknown>;
   final_decision?: Decision | null;
+  warnings?: AnalysisWarning[];
   mode: string;
 }
 
@@ -311,6 +312,12 @@ export interface LogAnomalyAnalyzeRequest {
 export interface LogAnomalyAnalyzeResult extends AlertAnalysisResult {
   anomaly_logs: number;
   lookback_minutes: number;
+}
+
+export interface AnalysisWarning {
+  code?: string;
+  message: string;
+  impact?: string;
 }
 
 export interface AlertEventSummary {

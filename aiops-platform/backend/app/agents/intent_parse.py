@@ -1,10 +1,13 @@
 import json
+import logging
 import re
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
 from app.services import llm_config_manager
 from .schemas import IntentResult, EntitiesResult, NEREntity
 from ..utils.llm_cache import llm_cache
+
+logger = logging.getLogger(__name__)
 
 class IntentParseAgent:
     """
@@ -82,6 +85,64 @@ Output Format (纯 JSON):
     "clarification_needed": false
 }}"""
 
+    def _fallback_ner_result(self, user_input: str) -> Dict[str, Any]:
+        text = user_input or ""
+        lowered = text.lower()
+        keywords = [item for item in re.split(r"[\s,，。；;:：]+", text) if item][:12]
+        entities: List[Dict[str, str]] = []
+
+        service_match = re.search(r'([a-zA-Z0-9_-]+(?:service|svc|k8s)[a-zA-Z0-9_-]*)', lowered)
+        if service_match:
+            value = service_match.group(1)
+            entities.append({"type": "SERVICE", "value": value, "normalized": value})
+
+        ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', text)
+        if ip_match:
+            ip_value = ip_match.group(0)
+            entities.append({"type": "IP", "value": ip_value, "normalized": ip_value})
+
+        symptom_value = ""
+        for symptom in ["timeout", "超时", "error", "异常", "慢", "失败", "拒绝", "连接"]:
+            if symptom in lowered or symptom in text:
+                symptom_value = symptom
+                break
+        if symptom_value:
+            entities.append({"type": "SYMPTOM", "value": symptom_value, "normalized": symptom_value})
+
+        return {
+            "entities": entities,
+            "keywords": keywords,
+            "intent": "DIAGNOSE" if ("[alert_rca]" in lowered or "分析" in text or "告警" in text) else "GENERAL_QA",
+            "confidence": "MEDIUM",
+        }
+
+    def _fallback_intent_result(self, user_input: str, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        lowered = (user_input or "").lower()
+        service = next((str(entity.get("normalized") or entity.get("value")) for entity in entities if entity.get("type") == "SERVICE"), None)
+        symptom = next((str(entity.get("normalized") or entity.get("value")) for entity in entities if entity.get("type") == "SYMPTOM"), "unknown")
+        ip = next((str(entity.get("normalized") or entity.get("value")) for entity in entities if entity.get("type") == "IP"), None)
+
+        intent = "GENERAL_QA"
+        if any(word in lowered for word in ["diagnose", "rca", "告警", "分析", "异常", "排查", "故障", "[alert_rca]"]):
+            intent = "DIAGNOSE"
+        elif any(word in lowered for word in ["重启", "执行", "fix", "repair"]):
+            intent = "EXECUTE_FIX"
+        elif any(word in lowered for word in ["状态", "status", "运行", "监控"]):
+            intent = "QUERY_STATUS"
+
+        return {
+            "intent": intent,
+            "entities": {
+                "service": service,
+                "ip": ip,
+                "symptom": symptom,
+                "time_range": "last_15_minutes",
+            },
+            "confidence": "MEDIUM",
+            "normalized_query": user_input,
+            "clarification_needed": False,
+        }
+
     def _extract_response_text(self, response: Any) -> str:
         try:
             choice = response.choices[0]
@@ -127,22 +188,21 @@ Output Format (纯 JSON):
         if cached is not None:
             ner_result = cached
         else:
-            response = client.chat.completions.create(
-                model=llm_config.model,
-                messages=[{"role": "user", "content": ner_prompt}],
-                temperature=temperature
-            )
-            content = self._extract_response_text(response)
-            content = re.sub(r'^```json\s*', '', content)
-            content = re.sub(r'\s*```$', '', content)
             try:
+                response = client.chat.completions.create(
+                    model=llm_config.model,
+                    messages=[{"role": "user", "content": ner_prompt}],
+                    temperature=temperature
+                )
+                content = self._extract_response_text(response)
+                content = re.sub(r'^```json\s*', '', content)
+                content = re.sub(r'\s*```$', '', content)
                 ner_result = json.loads(content)
-            except json.JSONDecodeError:
+            except Exception as exc:
+                logger.warning("IntentParseAgent NER fallback triggered: %s", exc)
                 ner_result = {
-                    "entities": [],
-                    "keywords": [],
-                    "intent": "GENERAL_QA",
-                    "confidence": "LOW"
+                    **self._fallback_ner_result(user_input),
+                    "confidence": "LOW",
                 }
             llm_cache.set(llm_config.model, cache_key_messages, temperature, ner_result)
         
@@ -154,24 +214,21 @@ Output Format (纯 JSON):
         if cached2 is not None:
             intent_result = cached2
         else:
-            response = client.chat.completions.create(
-                model=llm_config.model,
-                messages=[{"role": "user", "content": intent_prompt}],
-                temperature=temperature
-            )
-            content = self._extract_response_text(response)
-            content = re.sub(r'^```json\s*', '', content)
-            content = re.sub(r'\s*```$', '', content)
             try:
+                response = client.chat.completions.create(
+                    model=llm_config.model,
+                    messages=[{"role": "user", "content": intent_prompt}],
+                    temperature=temperature
+                )
+                content = self._extract_response_text(response)
+                content = re.sub(r'^```json\s*', '', content)
+                content = re.sub(r'\s*```$', '', content)
                 intent_result = json.loads(content)
-            except json.JSONDecodeError:
+            except Exception as exc:
+                logger.warning("IntentParseAgent intent fallback triggered: %s", exc)
                 intent_result = {
-                    "intent": "GENERAL_QA",
-                    "entities": {},
+                    **self._fallback_intent_result(user_input, entities),
                     "confidence": "LOW",
-                    "normalized_query": user_input,
-                    "clarification_needed": True,
-                    "raw_response": content
                 }
             llm_cache.set(llm_config.model, cache_key_messages2, temperature, intent_result)
         

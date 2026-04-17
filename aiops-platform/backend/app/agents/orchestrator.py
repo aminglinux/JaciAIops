@@ -64,19 +64,24 @@ class MultiAgentOrchestrator:
             "stages": {},
             "final_decision": None,
             "execution_result": None,
+            "warnings": [],
             "warning_cleared": False,
             "mode": "dynamic"
         }
         
         try:
+            is_alert_rca = self._is_alert_rca_query(user_query)
             result["stages"]["intent_parsing"] = await self._stage_intent_parsing(user_query)
             
             intent_data = result["stages"]["intent_parsing"]
             extra_context = None
 
-            if self._is_alert_rca_query(user_query):
+            if is_alert_rca:
                 extra_context = await self._stage_alert_rca_prefetch(user_query, intent_data)
                 result["stages"]["alert_prefetch"] = extra_context
+                prefetch_warnings = extra_context.get("warnings", []) if isinstance(extra_context, dict) else []
+                if isinstance(prefetch_warnings, list):
+                    result["warnings"] = prefetch_warnings
             
             matched_skills = self.skill_manager.search_relevant_skills(user_query, intent_data)
             skills_content = self.skill_manager.get_relevant_skills_content(matched_skills)
@@ -93,7 +98,7 @@ class MultiAgentOrchestrator:
                 user_query=user_query,
                 intent_data=intent_data,
                 extra_context=extra_context,
-                max_iterations=40
+                max_iterations=12 if is_alert_rca else 40
             )
             
             result["stages"]["dynamic_execution"] = {
@@ -306,6 +311,7 @@ class MultiAgentOrchestrator:
             "metrics_evidence": metrics_data,
             "log_evidence_prefetch": logs_data,
             "trace_evidence": traces_data,
+            "warnings": knowledge_context.get("warnings", []) if isinstance(knowledge_context, dict) else [],
         }
 
     async def _prefetch_alert_metrics(self, service: str, available_sources: Dict[str, bool]) -> Dict[str, Any]:
@@ -826,13 +832,53 @@ class MultiAgentOrchestrator:
             service=service,
             symptom=symptom_str
         )
-        
+        if hasattr(knowledge_result, "model_dump"):
+            knowledge_payload = knowledge_result.model_dump()
+        elif isinstance(knowledge_result, dict):
+            knowledge_payload = knowledge_result
+        else:
+            knowledge_payload = {}
+
+        topology_info = knowledge_payload.get("topology_info", {})
+        if hasattr(topology_info, "model_dump"):
+            topology_info = topology_info.model_dump()
+        topology_info = topology_info if isinstance(topology_info, dict) else {}
+        knowledge_report = str(knowledge_payload.get("knowledge_report", "") or "")
+        rag_context = str(knowledge_payload.get("rag_context", "") or "")
+
+        warnings: List[Dict[str, str]] = []
+        if not rag_context.strip():
+            warnings.append(
+                {
+                    "code": "RAG_UNAVAILABLE",
+                    "message": "RAG 服务不可用或未返回上下文，当前 RCA 基于告警与日志证据降级分析。",
+                    "impact": "知识参考缺失，结论置信度可能下降",
+                }
+            )
+        if topology_info.get("error") or str(topology_info.get("source", "")).startswith("mock"):
+            warnings.append(
+                {
+                    "code": "KG_DEGRADED",
+                    "message": "知识图谱查询异常，已使用降级拓扑数据。",
+                    "impact": "上下游依赖关系可能不完整",
+                }
+            )
+        if "知识分析暂时不可用" in knowledge_report:
+            warnings.append(
+                {
+                    "code": "KNOWLEDGE_ANALYSIS_DEGRADED",
+                    "message": "知识分析模型暂时不可用，已跳过该部分详细推理。",
+                    "impact": "建议动作的解释性会降低",
+                }
+            )
+
         return {
             "service": service,
-            "topology_info": knowledge_result.get("topology_info", {}),
-            "knowledge_report": knowledge_result.get("knowledge_report", ""),
-            "rag_context": knowledge_result.get("rag_context", ""),
-            "related_services": self._extract_related_services(knowledge_result.get("topology_info", {}))
+            "topology_info": topology_info,
+            "knowledge_report": knowledge_report,
+            "rag_context": rag_context,
+            "related_services": self._extract_related_services(topology_info),
+            "warnings": warnings,
         }
     
     async def _stage_observability(

@@ -1,4 +1,5 @@
 import json
+import asyncio
 from collections import Counter
 from datetime import timedelta
 from datetime import datetime
@@ -55,6 +56,9 @@ class LogAnomalyAnalyzePayload(BaseModel):
     alert_name: Optional[str] = None
     severity: str = "warning"
     service: Optional[str] = None
+
+
+ALERT_ANALYZE_TIMEOUT_SECONDS = 50
 
 
 def _safe_json_loads(value: Optional[str], default: Any) -> Any:
@@ -158,8 +162,31 @@ def _build_response(alert: NormalizedAlert, query: str, result: Dict[str, Any], 
         "query": query,
         "rca": result,
         "final_decision": result.get("final_decision"),
+        "warnings": result.get("warnings", []),
         "mode": "alert_rca",
     }
+
+
+async def _run_rca_with_timeout(query: str, timeout_seconds: int = ALERT_ANALYZE_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(orchestrator.process_query(query), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        return {
+            "error": f"RCA workflow timeout after {timeout_seconds}s",
+            "warnings": [
+                {
+                    "code": "RCA_TIMEOUT",
+                    "message": f"RCA 分析超过 {timeout_seconds}s，已超时终止。",
+                    "impact": "请检查 LLM/RAG/可观测数据源连通性，或缩小分析范围后重试",
+                }
+            ],
+            "final_decision": {
+                "decision": "TIMEOUT",
+                "root_cause_summary": "分析超时，未生成完整根因结论",
+                "action_plan": "建议先校验大模型配置可用性，再缩小回看窗口重试",
+            },
+            "mode": "alert_rca_timeout",
+        }
 
 
 def _serialize_event(event: AlertEvent) -> AlertEventDetail:
@@ -307,7 +334,7 @@ async def analyze_alert(
 ):
     alert = alert_normalizer.normalize_custom(request)
     query = alert_normalizer.build_rca_query(alert)
-    result = await orchestrator.process_query(query)
+    result = await _run_rca_with_timeout(query)
     event = _save_alert_event(db, alert, query, result)
     return _build_response(alert, query, result, event.id)
 
@@ -336,7 +363,7 @@ async def analyze_from_uploaded_logs(
     analyze_request = _build_log_analyze_request(anomaly_logs, payload)
     alert = alert_normalizer.normalize_custom(analyze_request)
     query = alert_normalizer.build_rca_query(alert)
-    result = await orchestrator.process_query(query)
+    result = await _run_rca_with_timeout(query)
     event = _save_alert_event(db, alert, query, result)
 
     response = _build_response(alert, query, result, event.id)
@@ -356,7 +383,7 @@ async def analyze_alertmanager_webhook(
     results: List[Dict[str, Any]] = []
     for alert in alerts:
         query = alert_normalizer.build_rca_query(alert)
-        result = await orchestrator.process_query(query)
+        result = await _run_rca_with_timeout(query)
         fingerprint = str(alert.annotations.get("fingerprint") or alert.labels.get("fingerprint") or payload.get("groupKey") or "")
         event = _save_alert_event(db, alert, query, result, fingerprint=fingerprint or None)
         results.append(_build_response(alert, query, result, event.id))

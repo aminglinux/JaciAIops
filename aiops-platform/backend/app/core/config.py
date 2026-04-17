@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     OPENAI_MODEL: str = "qwen-plus"
+    OPENAI_TIMEOUT_SECONDS: int = 30
+    OPENAI_MAX_RETRIES: int = 1
 
     TRACE_BACKEND: str = "jaeger"
     JAEGER_QUERY_URL: str = "http://localhost:16686"
