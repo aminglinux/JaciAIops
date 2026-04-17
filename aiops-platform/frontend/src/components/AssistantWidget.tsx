@@ -16,7 +16,7 @@ import {
 import { DoubleLeftOutlined, DoubleRightOutlined, DownOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
-import type { ChatHistoryMessage, ChatSessionSummary, LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
+import type { ChatHistoryMessage, ChatSessionSummary, DeepDiagnosisChatResult, LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
 
 const { TextArea } = Input;
 const { Text, Paragraph } = Typography;
@@ -177,6 +177,14 @@ interface Message {
     knowledge?: string;
     mode?: string;
     runtimeTopology?: RuntimeTopologySnapshot | null;
+    deepDiagnosis?: {
+      status?: string;
+      iterations?: number;
+      durationSeconds?: number;
+      matchedSkills?: string[];
+      tools?: string[];
+      warnings?: string[];
+    };
   };
 }
 
@@ -195,6 +203,16 @@ const mapHistoryMessage = (message: ChatHistoryMessage): Message => ({
     knowledge: message.knowledge?.knowledge_report,
     mode: message.mode || undefined,
     runtimeTopology: message.runtime_topology || null,
+    deepDiagnosis: message.knowledge?.deep_diagnosis
+      ? {
+          status: message.knowledge.deep_diagnosis.status,
+          iterations: message.knowledge.deep_diagnosis.iterations,
+          durationSeconds: message.knowledge.deep_diagnosis.duration_seconds,
+          matchedSkills: message.knowledge.deep_diagnosis.matched_skills || [],
+          tools: message.knowledge.deep_diagnosis.tools || [],
+          warnings: message.knowledge.deep_diagnosis.warnings || [],
+        }
+      : undefined,
   } : undefined,
 });
 
@@ -210,6 +228,7 @@ const AssistantWidget = () => {
   const [messages, setMessages] = useState<Message[]>([buildWelcomeMessage()]);
   const [loading, setLoading] = useState(false);
   const [analyzeProblem, setAnalyzeProblem] = useState(false);
+  const [deepDiagnosis, setDeepDiagnosis] = useState(false);
   const [runtimeBindings, setRuntimeBindings] = useState<LLMRuntimeBinding[]>([]);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -315,8 +334,15 @@ const AssistantWidget = () => {
     setActiveSessionId(null);
     setMessages([buildWelcomeMessage()]);
     setAnalyzeProblem(false);
+    setDeepDiagnosis(false);
     setLoading(false);
   };
+
+  useEffect(() => {
+    if (!analyzeProblem) {
+      setDeepDiagnosis(false);
+    }
+  }, [analyzeProblem]);
 
   useEffect(() => {
     if (!open) {
@@ -355,6 +381,65 @@ const AssistantWidget = () => {
       loading: true,
     };
     setMessages((prev) => [...prev, assistantMessage]);
+
+    if (analyzeProblem && deepDiagnosis) {
+      try {
+        const result = await knowledgeApi.deepDiagnose(currentInput, activeSessionId || undefined) as DeepDiagnosisChatResult;
+        if (result.session_id) {
+          setActiveSessionId(result.session_id);
+        }
+
+        setMessages((prev) =>
+          prev.map((item) =>
+            item.id === assistantMessage.id
+              ? {
+                  ...item,
+                  loading: false,
+                  content: result.answer || '诊断完成，已生成过程明细。',
+                  extra: {
+                    intent: result.intent?.intent
+                      ? {
+                          intent: result.intent.intent,
+                          entities: result.intent.entities || {},
+                          confidence: result.intent.confidence || 'LOW',
+                        }
+                      : undefined,
+                    knowledge: result.knowledge?.knowledge_report,
+                    mode: result.mode || 'deep_analysis',
+                    runtimeTopology: null,
+                    deepDiagnosis: {
+                      status: result.deep_diagnosis?.status,
+                      iterations: result.deep_diagnosis?.iterations,
+                      durationSeconds: result.deep_diagnosis?.duration_seconds,
+                      matchedSkills: result.deep_diagnosis?.matched_skills || [],
+                      tools: result.deep_diagnosis?.tools || [],
+                      warnings: result.deep_diagnosis?.warnings || [],
+                    },
+                  },
+                }
+              : item
+          )
+        );
+        void refreshSessions(result.session_id || activeSessionId);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : '深度诊断请求失败';
+        setMessages((prev) =>
+          prev.map((item) =>
+            item.id === assistantMessage.id
+              ? {
+                  ...item,
+                  loading: false,
+                  content: `抱歉，深度诊断执行失败：${detail}`,
+                }
+              : item
+          )
+        );
+      } finally {
+        setLoading(false);
+        streamRef.current = null;
+      }
+      return;
+    }
 
     try {
       streamRef.current?.close();
@@ -828,18 +913,24 @@ const AssistantWidget = () => {
                 runtimeLoading
                   ? '请稍候'
                   : activeRuntimeBinding
-                    ? `当前使用 ${activeRuntimeBinding.providerName} / ${activeRuntimeBinding.model}${activeRuntimeBinding.source === 'env' ? '（未绑定场景模型，使用环境变量 fallback）' : ''}`
+                    ? `当前使用 ${activeRuntimeBinding.providerName} / ${activeRuntimeBinding.model}${activeRuntimeBinding.source === 'env' ? '（未绑定场景模型，使用环境变量 fallback）' : ''}${analyzeProblem && deepDiagnosis ? '（已启用深度诊断）' : ''}`
                     : '暂未读取到模型绑定信息'
               }
             />
 
             <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                默认通用问答；打开开关后才走运维分析流程。
+                默认通用问答；打开分析后可选快速分析或深度诊断。
               </Text>
               <Space size={8}>
                 <Text strong style={{ fontSize: 12 }}>分析问题</Text>
                 <Switch checked={analyzeProblem} onChange={setAnalyzeProblem} />
+                {analyzeProblem && (
+                  <>
+                    <Text strong style={{ fontSize: 12 }}>深度诊断</Text>
+                    <Switch checked={deepDiagnosis} onChange={setDeepDiagnosis} />
+                  </>
+                )}
               </Space>
             </div>
 
@@ -888,8 +979,8 @@ const AssistantWidget = () => {
                               <Divider style={{ margin: '8px 0' }} />
                               <Space size={4} wrap>
                                 {item.extra.mode && (
-                                  <Tag color={item.extra.mode === 'analysis' ? 'red' : 'cyan'}>
-                                    {item.extra.mode === 'analysis' ? '分析问题' : '通用问答'}
+                                  <Tag color={item.extra.mode === 'analysis' ? 'red' : item.extra.mode === 'deep_analysis' ? 'volcano' : 'cyan'}>
+                                    {item.extra.mode === 'analysis' ? '分析问题' : item.extra.mode === 'deep_analysis' ? '深度诊断' : '通用问答'}
                                   </Tag>
                                 )}
                                 <Tag color={getIntentColor(item.extra.intent.intent)}>{item.extra.intent.intent}</Tag>
@@ -933,6 +1024,51 @@ const AssistantWidget = () => {
                               </div>
                             </div>
                           )}
+                          {item.extra?.deepDiagnosis && (
+                            <div style={{ marginTop: 10 }}>
+                              <Divider style={{ margin: '8px 0' }} />
+                              <Text type="secondary" style={{ fontSize: 12 }}>多Agent过程：</Text>
+                              <div style={{ marginTop: 6 }}>
+                                <Space size={[4, 6]} wrap>
+                                  {item.extra.deepDiagnosis.status && <Tag color="blue">状态: {item.extra.deepDiagnosis.status}</Tag>}
+                                  {typeof item.extra.deepDiagnosis.iterations === 'number' && <Tag>迭代: {item.extra.deepDiagnosis.iterations}</Tag>}
+                                  {typeof item.extra.deepDiagnosis.durationSeconds === 'number' && <Tag>耗时: {item.extra.deepDiagnosis.durationSeconds.toFixed(2)}s</Tag>}
+                                </Space>
+                              </div>
+                              {item.extra.deepDiagnosis.matchedSkills && item.extra.deepDiagnosis.matchedSkills.length > 0 && (
+                                <div style={{ marginTop: 6 }}>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>命中技能：</Text>
+                                  <div style={{ marginTop: 4 }}>
+                                    <Space size={[4, 6]} wrap>
+                                      {item.extra.deepDiagnosis.matchedSkills.slice(0, 8).map((skill) => (
+                                        <Tag key={skill} color="geekblue">{skill}</Tag>
+                                      ))}
+                                    </Space>
+                                  </div>
+                                </div>
+                              )}
+                              {item.extra.deepDiagnosis.tools && item.extra.deepDiagnosis.tools.length > 0 && (
+                                <div style={{ marginTop: 6 }}>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>执行工具：</Text>
+                                  <div style={{ marginTop: 4 }}>
+                                    <Space size={[4, 6]} wrap>
+                                      {item.extra.deepDiagnosis.tools.slice(0, 10).map((tool) => (
+                                        <Tag key={tool}>{tool}</Tag>
+                                      ))}
+                                    </Space>
+                                  </div>
+                                </div>
+                              )}
+                              {item.extra.deepDiagnosis.warnings && item.extra.deepDiagnosis.warnings.length > 0 && (
+                                <div style={{ marginTop: 6 }}>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>降级提示：</Text>
+                                  <Paragraph style={{ margin: '4px 0 0', fontSize: 12 }} ellipsis={{ rows: 3, expandable: true }}>
+                                    {item.extra.deepDiagnosis.warnings.join('；')}
+                                  </Paragraph>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
@@ -946,7 +1082,7 @@ const AssistantWidget = () => {
               <TextArea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={analyzeProblem ? '输入要分析的运维问题...' : '输入你的问题，和助手直接对话...'}
+                placeholder={analyzeProblem ? (deepDiagnosis ? '输入问题，执行多Agent深度诊断...' : '输入要分析的运维问题...') : '输入你的问题，和助手直接对话...'}
                 autoSize={{ minRows: 1, maxRows: 4 }}
                 style={{ flex: 1 }}
                 onPressEnter={(event) => {

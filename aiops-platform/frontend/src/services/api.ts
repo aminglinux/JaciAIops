@@ -42,6 +42,7 @@ import type {
   ManualGraphEntryPayload,
   ChatSessionSummary,
   ChatHistoryMessage,
+  DeepDiagnosisChatResult,
 } from '../types';
 
 const api = axios.create({
@@ -248,6 +249,14 @@ export const knowledgeApi = {
     const response = await api.post('/knowledge/qa/chat', {
       question,
       analyze_problem: analyzeProblem,
+      session_id: sessionId,
+    });
+    return response.data;
+  },
+
+  deepDiagnose: async (question: string, sessionId?: string): Promise<DeepDiagnosisChatResult> => {
+    const response = await api.post<DeepDiagnosisChatResult>('/knowledge/qa/deep-diagnose', {
+      question,
       session_id: sessionId,
     });
     return response.data;

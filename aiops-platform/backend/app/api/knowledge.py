@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.api.auth import User, get_current_user, require_admin
+from app.agents import MultiAgentOrchestrator
 from app.core.config import settings
 from app.core.database import ChatMessage, ChatSession, SessionLocal, get_db
 from app.observability import runtime_topology_service
@@ -27,6 +28,7 @@ MAX_TOPOLOGY_DEPTH = 2
 
 _neo4j_driver = None
 _neo4j_driver_lock = threading.Lock()
+_deep_orchestrator = MultiAgentOrchestrator()
 
 class KGQueryRequest(BaseModel):
     query: str
@@ -89,6 +91,11 @@ class GraphRelationUpdatePayload(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     analyze_problem: bool = False
+    session_id: Optional[str] = None
+
+
+class DeepDiagnoseRequest(BaseModel):
+    question: str
     session_id: Optional[str] = None
 
 
@@ -1050,6 +1057,150 @@ async def chat_with_knowledge_stream(request: ChatRequest, current_user: User = 
             yield f"data: {json.dumps({'type': 'done', 'session_id': session_identifier}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/qa/deep-diagnose")
+async def deep_diagnose_with_session(request: DeepDiagnoseRequest, current_user: User = Depends(get_current_user)):
+    chat_session = None
+    prepare_db = SessionLocal()
+    try:
+        chat_session = _get_or_create_chat_session(
+            prepare_db,
+            current_user,
+            request.session_id,
+            request.question,
+            True,
+        )
+        _save_chat_message(prepare_db, chat_session, "user", request.question)
+    finally:
+        prepare_db.close()
+
+    try:
+        orchestration_result = await _deep_orchestrator.process_query(request.question)
+    except Exception as exc:
+        logger.exception("deep_diagnose_with_session failed: %s", exc)
+        orchestration_result = {
+            "error": str(exc),
+            "warnings": [
+                {
+                    "code": "DEEP_DIAGNOSE_FAILED",
+                    "message": "深度诊断执行失败，已降级返回错误信息。",
+                    "impact": "本次未获得多Agent完整诊断结论",
+                }
+            ],
+            "stages": {},
+            "final_decision": {
+                "decision": "ERROR",
+                "root_cause_summary": "深度诊断失败",
+                "action_plan": "请检查模型与数据源配置后重试",
+            },
+            "duration_seconds": 0,
+            "mode": "deep_analysis",
+        }
+
+    stages = orchestration_result.get("stages", {}) if isinstance(orchestration_result, dict) else {}
+    intent_data = stages.get("intent_parsing", {}) if isinstance(stages, dict) else {}
+    skill_matching = stages.get("skill_matching", {}) if isinstance(stages, dict) else {}
+    dynamic_execution = stages.get("dynamic_execution", {}) if isinstance(stages, dict) else {}
+    alert_prefetch = stages.get("alert_prefetch", {}) if isinstance(stages, dict) else {}
+    knowledge_context = alert_prefetch.get("knowledge_context", {}) if isinstance(alert_prefetch, dict) else {}
+    final_decision = orchestration_result.get("final_decision", {}) if isinstance(orchestration_result, dict) else {}
+
+    execution_history = dynamic_execution.get("execution_history", []) if isinstance(dynamic_execution, dict) else []
+    tool_names: List[str] = []
+    if isinstance(execution_history, list):
+        unique_tools: List[str] = []
+        for item in execution_history:
+            if not isinstance(item, dict):
+                continue
+            tool_name = item.get("tool")
+            if isinstance(tool_name, str) and tool_name and tool_name not in unique_tools:
+                unique_tools.append(tool_name)
+        tool_names = unique_tools[:12]
+
+    matched_skills = skill_matching.get("matched_skills", []) if isinstance(skill_matching, dict) else []
+    if not isinstance(matched_skills, list):
+        matched_skills = []
+    matched_skills = [str(item) for item in matched_skills if isinstance(item, str)]
+
+    warning_items = orchestration_result.get("warnings", []) if isinstance(orchestration_result, dict) else []
+    warning_messages: List[str] = []
+    if isinstance(warning_items, list):
+        for item in warning_items:
+            if isinstance(item, dict) and item.get("message"):
+                warning_messages.append(str(item.get("message")))
+
+    summary = ""
+    if isinstance(final_decision, dict):
+        for key in ("root_cause_summary", "analysis_summary", "root_cause"):
+            value = final_decision.get(key)
+            if isinstance(value, str) and value.strip():
+                summary = value.strip()
+                break
+    if not summary:
+        summary = "诊断完成，已生成过程明细。"
+
+    recommendation = str(final_decision.get("recommendation", "") or "") if isinstance(final_decision, dict) else ""
+    action_plan = str(final_decision.get("action_plan", "") or "") if isinstance(final_decision, dict) else ""
+    risk_level = str(final_decision.get("risk_level", "") or "") if isinstance(final_decision, dict) else ""
+    confidence = str(final_decision.get("confidence", "") or "") if isinstance(final_decision, dict) else ""
+
+    answer_lines = ["### 深度诊断结果", summary]
+    if recommendation:
+        answer_lines.append(f"**建议动作：** {recommendation}")
+    if action_plan:
+        answer_lines.append(f"**执行方案：** {action_plan}")
+    if risk_level:
+        answer_lines.append(f"**风险等级：** {risk_level}")
+    if confidence:
+        answer_lines.append(f"**置信度：** {confidence}")
+    answer = "\n\n".join(answer_lines)
+
+    deep_summary = {
+        "status": dynamic_execution.get("status") if isinstance(dynamic_execution, dict) else None,
+        "iterations": len(execution_history) if isinstance(execution_history, list) else 0,
+        "duration_seconds": orchestration_result.get("duration_seconds") if isinstance(orchestration_result, dict) else None,
+        "matched_skills": matched_skills,
+        "tools": tool_names,
+        "warnings": warning_messages,
+    }
+    assistant_intent = intent_data if isinstance(intent_data, dict) else {}
+    assistant_knowledge = {
+        "knowledge_report": str(knowledge_context.get("knowledge_report", "") or "") if isinstance(knowledge_context, dict) else "",
+        "deep_diagnosis": deep_summary,
+    }
+
+    save_db = SessionLocal()
+    try:
+        persisted_session = _get_or_create_chat_session(
+            save_db,
+            current_user,
+            chat_session.session_id if chat_session else request.session_id,
+            request.question,
+            True,
+        )
+        _save_chat_message(
+            save_db,
+            persisted_session,
+            "assistant",
+            answer,
+            mode="deep_analysis",
+            intent=assistant_intent,
+            knowledge=assistant_knowledge,
+            runtime_topology=None,
+        )
+    finally:
+        save_db.close()
+
+    return {
+        "session_id": chat_session.session_id if chat_session else request.session_id,
+        "mode": "deep_analysis",
+        "intent": assistant_intent,
+        "knowledge": assistant_knowledge,
+        "answer": answer,
+        "deep_diagnosis": deep_summary,
+        "rca": orchestration_result,
+    }
 
 
 def _build_chat_error_response(question: str, analyze_problem: bool = False, session_id: Optional[str] = None) -> Dict[str, Any]:

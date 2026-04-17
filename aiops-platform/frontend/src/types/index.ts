@@ -413,9 +413,36 @@ export interface ChatHistoryMessage {
   } | null;
   knowledge?: {
     knowledge_report?: string;
+    deep_diagnosis?: DeepDiagnosisSummary;
   } | null;
   runtime_topology?: RuntimeTopologySnapshot | null;
   created_at?: string;
+}
+
+export interface DeepDiagnosisSummary {
+  status?: string;
+  iterations?: number;
+  duration_seconds?: number;
+  matched_skills?: string[];
+  tools?: string[];
+  warnings?: string[];
+}
+
+export interface DeepDiagnosisChatResult {
+  session_id?: string;
+  mode?: string;
+  intent?: {
+    intent: string;
+    entities: Record<string, string>;
+    confidence: string;
+  };
+  knowledge?: {
+    knowledge_report?: string;
+    deep_diagnosis?: DeepDiagnosisSummary;
+  };
+  answer?: string;
+  deep_diagnosis?: DeepDiagnosisSummary;
+  rca?: Record<string, unknown>;
 }
 
 export interface LLMProvider {
