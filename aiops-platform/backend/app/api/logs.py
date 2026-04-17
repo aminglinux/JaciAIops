@@ -63,6 +63,11 @@ class LogSourceConfigPayload(BaseModel):
     elasticsearch_enabled: bool = True
     elasticsearch_url: str
     elasticsearch_index_pattern: str = "logstash-*"
+    elasticsearch_auth_type: str = "none"
+    elasticsearch_username: Optional[str] = ""
+    elasticsearch_password: Optional[str] = ""
+    elasticsearch_api_key: Optional[str] = ""
+    elasticsearch_tls_verify: bool = True
     loki_enabled: bool = True
     loki_url: str
 
@@ -131,6 +136,9 @@ async def _query_elasticsearch_logs(
         raise ValueError("Elasticsearch 日志源未启用")
     base_url = str(source_config.get("elasticsearchUrl", "http://localhost:9200")).rstrip("/")
     index_pattern = str(source_config.get("elasticsearchIndexPattern", "logstash-*"))
+    auth_type = str(source_config.get("elasticsearchAuthType", "none") or "none")
+    username = str(source_config.get("elasticsearchUsername", "") or "")
+    tls_verify = bool(source_config.get("elasticsearchTlsVerify", True))
 
     must_clauses: List[Dict[str, Any]] = []
     if keyword:
@@ -192,8 +200,19 @@ async def _query_elasticsearch_logs(
         },
     }
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.post(f"{base_url}/{index_pattern}/_search", json=payload)
+    headers: Dict[str, str] = {}
+    auth = None
+    if auth_type == "basic":
+        password = str(source_config.get("elasticsearchPassword", "") or "")
+        if username and password:
+            auth = (username, password)
+    elif auth_type == "api_key":
+        api_key = str(source_config.get("elasticsearchApiKey", "") or "")
+        if api_key:
+            headers["Authorization"] = f"ApiKey {api_key}"
+
+    async with httpx.AsyncClient(timeout=20.0, verify=tls_verify) as client:
+        response = await client.post(f"{base_url}/{index_pattern}/_search", json=payload, headers=headers, auth=auth)
         response.raise_for_status()
         hits = response.json().get("hits", {}).get("hits", [])
 

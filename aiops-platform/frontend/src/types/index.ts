@@ -59,6 +59,11 @@ export interface LogSourceConfig {
   elasticsearchEnabled: boolean;
   elasticsearchUrl: string;
   elasticsearchIndexPattern: string;
+  elasticsearchAuthType: 'none' | 'basic' | 'api_key' | string;
+  elasticsearchUsername?: string;
+  elasticsearchPasswordMasked?: string;
+  elasticsearchApiKeyMasked?: string;
+  elasticsearchTlsVerify: boolean;
   lokiEnabled: boolean;
   lokiUrl: string;
   updatedBy?: string | null;
@@ -69,6 +74,11 @@ export interface LogSourceConfigPayload {
   elasticsearch_enabled: boolean;
   elasticsearch_url: string;
   elasticsearch_index_pattern: string;
+  elasticsearch_auth_type: string;
+  elasticsearch_username?: string;
+  elasticsearch_password?: string;
+  elasticsearch_api_key?: string;
+  elasticsearch_tls_verify: boolean;
   loki_enabled: boolean;
   loki_url: string;
 }
