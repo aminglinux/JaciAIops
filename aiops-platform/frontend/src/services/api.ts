@@ -255,10 +255,16 @@ export const knowledgeApi = {
   },
 
   deepDiagnose: async (question: string, sessionId?: string): Promise<DeepDiagnosisChatResult> => {
-    const response = await api.post<DeepDiagnosisChatResult>('/knowledge/qa/deep-diagnose', {
-      question,
-      session_id: sessionId,
-    });
+    const response = await api.post<DeepDiagnosisChatResult>(
+      '/knowledge/qa/deep-diagnose',
+      {
+        question,
+        session_id: sessionId,
+      },
+      {
+        timeout: 180000,
+      }
+    );
     return response.data;
   },
 

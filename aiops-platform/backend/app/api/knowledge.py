@@ -29,7 +29,7 @@ MAX_TOPOLOGY_DEPTH = 2
 
 _neo4j_driver = None
 _neo4j_driver_lock = threading.Lock()
-DEEP_DIAGNOSE_TIMEOUT_SECONDS = 180
+DEEP_DIAGNOSE_TIMEOUT_SECONDS = 110
 
 class KGQueryRequest(BaseModel):
     query: str
