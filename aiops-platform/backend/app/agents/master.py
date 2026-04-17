@@ -23,6 +23,22 @@ class MasterAgent:
     def __init__(self, tool_registry: ToolRegistry = None):
         self.skill_manager = SkillManager()
         self.tool_registry = tool_registry or ToolRegistry()
+
+    def _extract_message_from_llm_response(self, response: Any):
+        if response is None:
+            raise ValueError("LLM response is None")
+        if isinstance(response, str):
+            raise ValueError(f"LLM returned string response: {response[:200]}")
+
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, list) or len(choices) == 0:
+            raise ValueError(f"LLM response missing choices: {str(response)[:200]}")
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is None:
+            raise ValueError(f"LLM response missing message: {str(response)[:200]}")
+        return message
     
     async def plan_and_execute(
         self,
@@ -53,16 +69,22 @@ class MasterAgent:
         while iteration < max_iterations:
             iteration += 1
             client, llm_config = llm_config_manager.get_client_for_scene("master_planner")
-            
-            response = client.chat.completions.create(
-                model=llm_config.model,
-                messages=messages,
-                tools=self.tool_registry.get_tools_for_llm(),
-                tool_choice="auto",
-                temperature=llm_config.temperature
-            )
-            
-            message = response.choices[0].message
+
+            try:
+                response = client.chat.completions.create(
+                    model=llm_config.model,
+                    messages=messages,
+                    tools=self.tool_registry.get_tools_for_llm(),
+                    tool_choice="auto",
+                    temperature=llm_config.temperature
+                )
+                message = self._extract_message_from_llm_response(response)
+            except Exception as exc:
+                return {
+                    "status": "incomplete",
+                    "execution_history": execution_history,
+                    "message": f"LLM planner response invalid: {exc}"
+                }
             
             if message.content:
                 messages.append({"role": "assistant", "content": message.content})
@@ -70,7 +92,10 @@ class MasterAgent:
             if message.tool_calls:
                 for tool_call in message.tool_calls:
                     tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
+                    try:
+                        tool_args = json.loads(tool_call.function.arguments)
+                    except Exception:
+                        tool_args = {}
                     
                     messages.append({
                         "role": "assistant",
