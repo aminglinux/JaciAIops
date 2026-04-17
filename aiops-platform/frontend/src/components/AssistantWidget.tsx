@@ -13,7 +13,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import { DownOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
+import { DoubleLeftOutlined, DoubleRightOutlined, DownOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
 
 import { knowledgeApi, llmApi } from '../services/api';
 import type { ChatHistoryMessage, ChatSessionSummary, LLMRuntimeBinding, RuntimeTopologySnapshot } from '../types';
@@ -200,6 +200,12 @@ const mapHistoryMessage = (message: ChatHistoryMessage): Message => ({
 
 const AssistantWidget = () => {
   const [open, setOpen] = useState(false);
+  const [launcherEdgeHidden, setLauncherEdgeHidden] = useState<boolean>(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return localStorage.getItem('assistant_launcher_edge_hidden') === '1';
+  });
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([buildWelcomeMessage()]);
   const [loading, setLoading] = useState(false);
@@ -525,10 +531,21 @@ const AssistantWidget = () => {
     setDragging(true);
   };
 
+  const hideLauncherToEdge = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    setLauncherEdgeHidden(true);
+    localStorage.setItem('assistant_launcher_edge_hidden', '1');
+  };
+
+  const restoreLauncherFromEdge = () => {
+    setLauncherEdgeHidden(false);
+    localStorage.setItem('assistant_launcher_edge_hidden', '0');
+  };
+
   return (
     <>
       <style>{markdownMessageStyle}</style>
-      {!open && (
+      {!open && !launcherEdgeHidden && (
         <button
           type="button"
           className="assistant-launcher-bubble"
@@ -592,6 +609,55 @@ const AssistantWidget = () => {
               boxShadow: '0 0 0 3px rgba(82,196,26,0.18)',
             }}
           />
+          <button
+            type="button"
+            title="贴边隐藏"
+            onClick={hideLauncherToEdge}
+            style={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              width: 22,
+              height: 22,
+              borderRadius: 999,
+              border: 'none',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'rgba(255,255,255,0.24)',
+              color: '#fff',
+            }}
+          >
+            <DoubleRightOutlined style={{ fontSize: 11 }} />
+          </button>
+        </button>
+      )}
+
+      {!open && launcherEdgeHidden && (
+        <button
+          type="button"
+          onClick={restoreLauncherFromEdge}
+          title="还原助手"
+          style={{
+            position: 'fixed',
+            right: 0,
+            bottom: 24,
+            zIndex: 1100,
+            border: 'none',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '10px 10px 10px 8px',
+            borderRadius: '14px 0 0 14px',
+            color: '#fff',
+            background: 'linear-gradient(135deg, #1677ff 0%, #7c3aed 100%)',
+            boxShadow: '0 10px 24px rgba(22,119,255,0.28)',
+          }}
+        >
+          <RobotOutlined style={{ fontSize: 14 }} />
+          <DoubleLeftOutlined style={{ fontSize: 10 }} />
         </button>
       )}
 
